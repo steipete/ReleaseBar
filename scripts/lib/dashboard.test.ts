@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -18,6 +19,41 @@ import {
   workersDevApiOrigin,
 } from "../../src/routing.js";
 import worker from "../../worker/index.js";
+
+const textEncoder = new TextEncoder();
+
+function kvStore(initial: Record<string, string> = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    async get(key: string) {
+      return values.get(key) ?? null;
+    },
+    async put(key: string, value: string) {
+      values.set(key, value);
+    },
+  };
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function signedJson(secret: string, value: unknown): Promise<string> {
+  const payload = base64Url(textEncoder.encode(JSON.stringify(value)));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    textEncoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, textEncoder.encode(payload));
+  return `${payload}.${base64Url(new Uint8Array(signature))}`;
+}
 
 test("owner route parsing keeps root static and owners API-backed", () => {
   assert.equal(ownerFromPath("/"), null);
@@ -60,6 +96,7 @@ test("worker rejects oversized custom source requests", async () => {
 test("worker exposes GitHub App auth endpoints", async () => {
   const env = {
     AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore(),
     GITHUB_APP_CLIENT_ID: "Iv123",
     GITHUB_APP_CLIENT_SECRET: "client-secret",
     GITHUB_APP_SLUG: "releasedeck",
@@ -70,10 +107,14 @@ test("worker exposes GitHub App auth endpoints", async () => {
   assert.equal(anonymous.status, 200);
   assert.deepEqual(await anonymous.json(), {
     configured: true,
+    quotaConfigured: false,
     user: null,
+    installations: [],
+    installNeeded: false,
+    installReason: null,
     loginUrl: "https://releasedeck.dev/api/auth/login",
     logoutUrl: "https://releasedeck.dev/api/auth/logout",
-    installUrl: "https://github.com/apps/releasedeck/installations/new",
+    installUrl: "https://releasedeck.dev/api/auth/install",
     appUrl: "https://github.com/apps/releasedeck",
   });
 
@@ -94,6 +135,235 @@ test("worker exposes GitHub App auth endpoints", async () => {
     context,
   );
   assert.equal(badCallback.status, 400);
+
+  const install = await worker.fetch(
+    new Request("https://releasedeck.dev/api/auth/install?returnTo=/openclaw"),
+    env,
+    context,
+  );
+  assert.equal(install.status, 302);
+  assert.equal(
+    install.headers.get("location"),
+    "https://github.com/apps/releasedeck/installations/new",
+  );
+});
+
+test("worker reports GitHub App installation coverage for signed-in users", async () => {
+  const sessionId = "session-1";
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const authCookie = await signedJson("test-secret", { id: sessionId, exp });
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore({
+      [`auth:session:${sessionId}`]: JSON.stringify({
+        user: {
+          id: 1,
+          login: "octocat",
+          name: null,
+          avatarUrl: "https://avatars.githubusercontent.com/u/1",
+          url: "https://github.com/octocat",
+        },
+        accessToken: "user-token",
+        iat: exp - 600,
+        exp,
+      }),
+    }),
+    GITHUB_APP_CLIENT_ID: "Iv123",
+    GITHUB_APP_CLIENT_SECRET: "client-secret",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: "private-key",
+    GITHUB_APP_SLUG: "releasedeck",
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/user/installations") {
+      return Response.json({
+        installations: [
+          {
+            id: 1,
+            account: {
+              login: "openclaw",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2",
+              html_url: "https://github.com/openclaw",
+            },
+            html_url: "https://github.com/organizations/openclaw/settings/installations/1",
+            repository_selection: "all",
+            target_type: "Organization",
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://releasedeck.dev/api/me?returnTo=/openclaw", {
+        headers: { cookie: `rd_session=${authCookie}` },
+      }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.user.login, "octocat");
+    assert.equal(body.installNeeded, false);
+    assert.equal(body.installReason, null);
+    assert.equal(body.quotaConfigured, true);
+    assert.equal(body.installations[0].accountLogin, "openclaw");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker surfaces mixed-account dashboards as shared-quota", async () => {
+  const sessionId = "session-2";
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const authCookie = await signedJson("test-secret", { id: sessionId, exp });
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore({
+      [`auth:session:${sessionId}`]: JSON.stringify({
+        user: {
+          id: 1,
+          login: "octocat",
+          name: null,
+          avatarUrl: "https://avatars.githubusercontent.com/u/1",
+          url: "https://github.com/octocat",
+        },
+        accessToken: "user-token",
+        iat: exp - 600,
+        exp,
+      }),
+    }),
+    GITHUB_APP_CLIENT_ID: "Iv123",
+    GITHUB_APP_CLIENT_SECRET: "client-secret",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: "private-key",
+    GITHUB_APP_SLUG: "releasedeck",
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/user/installations") {
+      return Response.json({
+        installations: ["openclaw", "steipete"].map((login, index) => ({
+          id: index + 1,
+          account: {
+            login,
+            type: index === 0 ? "Organization" : "User",
+            avatar_url: `https://avatars.githubusercontent.com/u/${index + 2}`,
+            html_url: `https://github.com/${login}`,
+          },
+          html_url: `https://github.com/settings/installations/${index + 1}`,
+          repository_selection: "all",
+          target_type: index === 0 ? "Organization" : "User",
+        })),
+      });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://releasedeck.dev/api/me?returnTo=/openclaw?owners=steipete", {
+        headers: { cookie: `rd_session=${authCookie}` },
+      }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.installNeeded, false);
+    assert.match(body.installReason, /Mixed-account dashboards use shared API quota/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker uses GitHub App installation token for cold owner dashboards", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const sessionId = "session-3";
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const authCookie = await signedJson("test-secret", { id: sessionId, exp });
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore({
+      [`auth:session:${sessionId}`]: JSON.stringify({
+        user: {
+          id: 1,
+          login: "octocat",
+          name: null,
+          avatarUrl: "https://avatars.githubusercontent.com/u/1",
+          url: "https://github.com/octocat",
+        },
+        accessToken: "user-token",
+        iat: exp - 600,
+        exp,
+      }),
+    }),
+    GITHUB_APP_CLIENT_ID: "Iv123",
+    GITHUB_APP_CLIENT_SECRET: "client-secret",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+    GITHUB_APP_SLUG: "releasedeck",
+  };
+  const originalFetch = globalThis.fetch;
+  let ownerResolvedWithInstallationToken = false;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/user/installations") {
+      assert.equal(authorization, "Bearer user-token");
+      return Response.json({
+        installations: [
+          {
+            id: 1,
+            account: {
+              login: "openclaw",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2",
+              html_url: "https://github.com/openclaw",
+            },
+            html_url: "https://github.com/organizations/openclaw/settings/installations/1",
+            repository_selection: "all",
+            target_type: "Organization",
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/app/installations/1/access_tokens") {
+      assert.match(authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      return Response.json({ token: "installation-token" });
+    }
+    if (url.pathname === "/users/openclaw") {
+      assert.equal(authorization, "Bearer installation-token");
+      ownerResolvedWithInstallationToken = true;
+      return Response.json({ login: "openclaw", type: "Organization" });
+    }
+    if (url.pathname === "/orgs/openclaw/repos") {
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json([]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://releasedeck.dev/api/openclaw", {
+        headers: { cookie: `rd_session=${authCookie}` },
+      }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(ownerResolvedWithInstallationToken, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("query options are explicit booleans", () => {

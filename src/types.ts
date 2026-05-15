@@ -68,9 +68,23 @@ export type AuthUser = {
   url: string;
 };
 
+export type AuthInstallation = {
+  id: number;
+  accountLogin: string;
+  accountType: "user" | "org";
+  accountUrl: string;
+  avatarUrl: string;
+  repositorySelection: "all" | "selected";
+  repositories: string[];
+};
+
 export type AuthPayload = {
   configured: boolean;
+  quotaConfigured: boolean;
   user: AuthUser | null;
+  installations: AuthInstallation[];
+  installNeeded: boolean;
+  installReason: string | null;
   loginUrl: string;
   logoutUrl: string;
   installUrl: string;

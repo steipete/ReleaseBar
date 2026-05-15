@@ -6,11 +6,18 @@ import {
   validOwnerSlug,
   validRepoSlug,
 } from "../scripts/lib/dashboard.js";
-import type { AuthPayload, AuthUser, DashboardPayload, Owner } from "../src/types.js";
+import type {
+  AuthInstallation,
+  AuthPayload,
+  AuthUser,
+  DashboardPayload,
+  Owner,
+} from "../src/types.js";
 
 type KVNamespace = {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete?(key: string): Promise<void>;
 };
 
 type Env = {
@@ -19,6 +26,8 @@ type Env = {
   DASHBOARD_CACHE?: KVNamespace;
   GITHUB_APP_CLIENT_ID?: string;
   GITHUB_APP_CLIENT_SECRET?: string;
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_SLUG?: string;
   GITHUB_TOKEN?: string;
   RELEASEDECK_CANONICAL_DOMAIN?: string;
@@ -35,6 +44,7 @@ const repoLimit = 8;
 const maxCustomSources = 8;
 const schemaVersion = 1;
 const sessionCookie = "rd_session";
+const installReturnCookie = "rd_install_return";
 const sessionMaxAgeSeconds = 30 * 24 * 60 * 60;
 const stateMaxAgeSeconds = 10 * 60;
 const locks = new Map<string, Promise<DashboardPayload>>();
@@ -52,6 +62,7 @@ type DashboardRequest = {
   subtitle: string;
   key: string;
   url: URL;
+  token?: string;
 };
 
 type AuthState = {
@@ -61,7 +72,13 @@ type AuthState = {
 };
 
 type AuthSession = {
+  id: string;
+  exp: number;
+};
+
+type StoredAuthSession = {
   user: AuthUser;
+  accessToken: string;
   iat: number;
   exp: number;
 };
@@ -78,6 +95,37 @@ type GitHubOAuthUser = {
   name: string | null;
   avatar_url: string;
   html_url: string;
+};
+
+type GitHubInstallation = {
+  id: number;
+  account: {
+    login: string;
+    avatar_url: string;
+    html_url: string;
+    type: string;
+  } | null;
+  html_url: string;
+  repository_selection: "all" | "selected";
+  target_type: string;
+};
+
+type GitHubInstallationList = {
+  installations?: GitHubInstallation[];
+};
+
+type GitHubInstallationRepositoryList = {
+  repositories?: Array<{ full_name: string }>;
+};
+
+type GitHubInstallationToken = {
+  token?: string;
+  message?: string;
+};
+
+type TokenSources = {
+  owners: string[];
+  repos: string[];
 };
 
 function shouldServeAppShell(url: URL): boolean {
@@ -186,7 +234,10 @@ function parseCookies(request: Request): Map<string, string> {
 
 function authConfigured(env: Env): boolean {
   return Boolean(
-    env.AUTH_COOKIE_SECRET && env.GITHUB_APP_CLIENT_ID && env.GITHUB_APP_CLIENT_SECRET,
+    env.AUTH_COOKIE_SECRET &&
+    env.DASHBOARD_CACHE &&
+    env.GITHUB_APP_CLIENT_ID &&
+    env.GITHUB_APP_CLIENT_SECRET,
   );
 }
 
@@ -194,26 +245,45 @@ function appSlug(env: Env): string {
   return env.GITHUB_APP_SLUG || "releasedeck";
 }
 
-function authCookie(value: string, maxAge = sessionMaxAgeSeconds): string {
-  return `${sessionCookie}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+function cookie(name: string, value: string, maxAge = sessionMaxAgeSeconds): string {
+  return `${name}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 
-function authUrls(url: URL, env: Env): Omit<AuthPayload, "configured" | "user"> {
+function authCookie(value: string, maxAge = sessionMaxAgeSeconds): string {
+  return cookie(sessionCookie, value, maxAge);
+}
+
+function installReturnCookieValue(value: string, maxAge = stateMaxAgeSeconds): string {
+  return cookie(installReturnCookie, value, maxAge);
+}
+
+function authUrls(
+  url: URL,
+  env: Env,
+): Pick<AuthPayload, "loginUrl" | "logoutUrl" | "installUrl" | "appUrl"> {
   return {
     loginUrl: `${url.origin}/api/auth/login`,
     logoutUrl: `${url.origin}/api/auth/logout`,
-    installUrl: `https://github.com/apps/${appSlug(env)}/installations/new`,
+    installUrl: `${url.origin}/api/auth/install`,
     appUrl: `https://github.com/apps/${appSlug(env)}`,
   };
 }
 
-async function currentUser(request: Request, env: Env): Promise<AuthUser | null> {
+async function currentSession(request: Request, env: Env): Promise<StoredAuthSession | null> {
   if (!env.AUTH_COOKIE_SECRET) return null;
   const token = parseCookies(request).get(sessionCookie);
   if (!token) return null;
-  const session = await verifySignedJson<AuthSession>(env.AUTH_COOKIE_SECRET, token);
-  if (!session || session.exp < Math.floor(Date.now() / 1000)) return null;
-  return session.user;
+  const pointer = await verifySignedJson<AuthSession>(env.AUTH_COOKIE_SECRET, token);
+  if (!pointer || pointer.exp < Math.floor(Date.now() / 1000)) return null;
+
+  const stored = await env.DASHBOARD_CACHE?.get(`auth:session:${pointer.id}`);
+  if (stored) {
+    const session = JSON.parse(stored) as StoredAuthSession;
+    return session.exp < Math.floor(Date.now() / 1000) ? null : session;
+  }
+
+  const legacy = pointer as unknown as StoredAuthSession;
+  return legacy.user && legacy.exp >= Math.floor(Date.now() / 1000) ? legacy : null;
 }
 
 function ownerListFromUrl(url: URL, primaryOwner?: string): string[] {
@@ -250,12 +320,16 @@ function dashboardSubtitle(owners: Owner[], repos: string[]): string {
   return `Release freshness across ${sourceCount} public GitHub sources.`;
 }
 
-async function resolveOwners(ownerSlugs: string[], env: Env): Promise<Owner[] | null> {
+async function resolveOwners(
+  ownerSlugs: string[],
+  env: Env,
+  token?: string | null,
+): Promise<Owner[] | null> {
   const owners: Owner[] = [];
   for (const owner of ownerSlugs) {
     const resolved = await resolveOwnerType(owner, {
       fetch: workerFetch,
-      token: env.GITHUB_TOKEN,
+      token: token ?? env.GITHUB_TOKEN,
     });
     if (!resolved) {
       return null;
@@ -372,25 +446,53 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-function redirectResponse(location: string, headers: Record<string, string> = {}): Response {
+function redirectResponse(
+  location: string,
+  headers: Record<string, string | string[]> = {},
+): Response {
+  const responseHeaders = new Headers({
+    location,
+    "cache-control": "no-store",
+  });
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        responseHeaders.append(key, item);
+      }
+    } else {
+      responseHeaders.set(key, value);
+    }
+  }
   return new Response(null, {
     status: 302,
-    headers: {
-      location,
-      "cache-control": "no-store",
-      ...headers,
-    },
+    headers: responseHeaders,
   });
 }
 
 async function meResponse(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+  const session = await currentSession(request, env);
+  const installations = session
+    ? await githubInstallations(session.accessToken).catch(() => [])
+    : [];
+  const coverage = session
+    ? sourceCoverage(installations, currentReturnTo(url), url.origin, appTokenConfigured(env))
+    : { needed: false, reason: null };
   const body: AuthPayload = {
     configured: authConfigured(env),
-    user: await currentUser(request, env),
+    quotaConfigured: appTokenConfigured(env),
+    user: session?.user ?? null,
+    installations,
+    installNeeded: Boolean(session && coverage.needed),
+    installReason: session ? coverage.reason : null,
     ...authUrls(url, env),
   };
   return jsonResponse(body, 200, { "cache-control": "no-store" });
+}
+
+function currentReturnTo(url: URL): string {
+  const value = url.searchParams.get("returnTo");
+  return safeReturnTo(value) || "/";
 }
 
 async function loginResponse(request: Request, env: Env): Promise<Response> {
@@ -465,6 +567,332 @@ async function githubUser(accessToken: string): Promise<AuthUser> {
   };
 }
 
+async function githubJson<T>(accessToken: string, pathname: string): Promise<T> {
+  const response = await workerFetch(`https://api.github.com${pathname}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${accessToken}`,
+      "user-agent": "ReleaseDeck",
+      "x-github-api-version": "2022-11-28",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub request failed: ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function githubInstallations(accessToken: string): Promise<AuthInstallation[]> {
+  const result = await githubJson<GitHubInstallationList>(
+    accessToken,
+    "/user/installations?per_page=100",
+  );
+  const installations = result.installations ?? [];
+  return Promise.all(
+    installations
+      .filter((installation) => installation.account)
+      .map(async (installation) => {
+        const account = installation.account;
+        if (!account) {
+          throw new Error("missing installation account");
+        }
+        const repositories =
+          installation.repository_selection === "selected"
+            ? await githubInstallationRepositories(accessToken, installation.id)
+            : [];
+        return {
+          id: installation.id,
+          accountLogin: account.login.toLowerCase(),
+          accountType: account.type === "Organization" ? "org" : "user",
+          accountUrl: account.html_url,
+          avatarUrl: account.avatar_url,
+          repositorySelection: installation.repository_selection,
+          repositories,
+        };
+      }),
+  );
+}
+
+async function githubInstallationRepositories(
+  accessToken: string,
+  installationId: number,
+): Promise<string[]> {
+  const repositories: string[] = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const result = await githubJson<GitHubInstallationRepositoryList>(
+      accessToken,
+      `/user/installations/${installationId}/repositories?per_page=100&page=${page}`,
+    );
+    const batch = result.repositories ?? [];
+    repositories.push(...batch.map((repo) => repo.full_name.toLowerCase()));
+    if (batch.length < 100) break;
+  }
+  return repositories;
+}
+
+function appTokenConfigured(env: Env): boolean {
+  return Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY);
+}
+
+function normalizePrivateKey(value: string): string {
+  return value.includes("\\n") ? value.replaceAll("\\n", "\n") : value;
+}
+
+function concatBytes(...chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function derLength(length: number): Uint8Array {
+  if (length < 0x80) {
+    return new Uint8Array([length]);
+  }
+  const bytes: number[] = [];
+  let value = length;
+  while (value > 0) {
+    bytes.unshift(value & 0xff);
+    value >>= 8;
+  }
+  return new Uint8Array([0x80 | bytes.length, ...bytes]);
+}
+
+function der(tag: number, body: Uint8Array): Uint8Array {
+  return concatBytes(new Uint8Array([tag]), derLength(body.length), body);
+}
+
+function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function pkcs1RsaToPkcs8(pkcs1: Uint8Array): ArrayBuffer {
+  const version = new Uint8Array([0x02, 0x01, 0x00]);
+  const rsaEncryption = new Uint8Array([
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+  ]);
+  const algorithm = der(0x30, concatBytes(rsaEncryption, new Uint8Array([0x05, 0x00])));
+  const privateKey = der(0x04, pkcs1);
+  return arrayBuffer(der(0x30, concatBytes(version, algorithm, privateKey)));
+}
+
+function pemToPkcs8ArrayBuffer(pem: string): ArrayBuffer {
+  const normalized = normalizePrivateKey(pem);
+  if (/BEGIN ENCRYPTED PRIVATE KEY/.test(normalized)) {
+    throw new Error("Encrypted GitHub App private keys are not supported");
+  }
+  const isPkcs1Rsa = /BEGIN RSA PRIVATE KEY/.test(normalized);
+  const base64 = normalized
+    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/g, "")
+    .replace(/-----END (?:RSA )?PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return isPkcs1Rsa ? pkcs1RsaToPkcs8(bytes) : arrayBuffer(bytes);
+}
+
+async function githubAppJwt(env: Env): Promise<string> {
+  if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
+    throw new Error("GitHub App credentials are not configured");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const claims = {
+    iat: now - 60,
+    exp: now + 9 * 60,
+    iss: env.GITHUB_APP_ID,
+  };
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToPkcs8ArrayBuffer(env.GITHUB_APP_PRIVATE_KEY),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(unsigned),
+  );
+  return `${unsigned}.${base64Url(new Uint8Array(signature))}`;
+}
+
+async function githubInstallationToken(env: Env, installationId: number): Promise<string | null> {
+  const jwt = await githubAppJwt(env);
+  const response = await workerFetch(
+    `https://api.github.com/app/installations/${installationId}/access_tokens`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${jwt}`,
+        "user-agent": "ReleaseDeck",
+        "x-github-api-version": "2022-11-28",
+      },
+    },
+  );
+  const result = (await response.json()) as GitHubInstallationToken;
+  if (!response.ok || !result.token) {
+    throw new Error(result.message || `GitHub installation token failed: ${response.status}`);
+  }
+  return result.token;
+}
+
+function installationCoversSources(installation: AuthInstallation, sources: TokenSources): boolean {
+  if (sources.owners.length > 0) {
+    return (
+      sources.owners.every((owner) => owner === installation.accountLogin) &&
+      sources.repos.every((repo) => repo.split("/")[0] === installation.accountLogin) &&
+      installation.repositorySelection === "all"
+    );
+  }
+
+  if (sources.repos.length === 0) {
+    return true;
+  }
+
+  return sources.repos.every((repo) => {
+    const owner = repo.split("/")[0] ?? "";
+    return (
+      owner === installation.accountLogin &&
+      (installation.repositorySelection === "all" || installation.repositories.includes(repo))
+    );
+  });
+}
+
+function matchingInstallation(
+  installations: AuthInstallation[],
+  sources: TokenSources,
+): AuthInstallation | null {
+  return (
+    installations.find((installation) => installationCoversSources(installation, sources)) ?? null
+  );
+}
+
+async function requestInstallationToken(
+  request: Request,
+  env: Env,
+  sources: TokenSources,
+): Promise<string | null> {
+  if (!appTokenConfigured(env)) return null;
+  const session = await currentSession(request, env);
+  if (!session) return null;
+  const installations = await githubInstallations(session.accessToken);
+  const installation = matchingInstallation(installations, sources);
+  return installation ? githubInstallationToken(env, installation.id) : null;
+}
+
+function sourceAccounts(sources: TokenSources): string[] {
+  return [
+    ...new Set([
+      ...sources.owners,
+      ...sources.repos.map((repo) => repo.split("/")[0] ?? "").filter(Boolean),
+    ]),
+  ];
+}
+
+function returnToSources(returnTo: string, origin: string): { owners: string[]; repos: string[] } {
+  const url = new URL(returnTo, origin);
+  const rawOwner = slugOwner(url.pathname.split("/").filter(Boolean)[0] ?? "");
+  const primaryOwner = validOwnerSlug(rawOwner) ? rawOwner : null;
+  return {
+    owners: [
+      ...new Set([
+        ...(primaryOwner ? [primaryOwner] : []),
+        ...ownerListFromUrl(url, primaryOwner ?? undefined),
+      ]),
+    ],
+    repos: repoListFromUrl(url),
+  };
+}
+
+function sourceCoverage(
+  installations: AuthInstallation[],
+  returnTo: string,
+  origin: string,
+  quotaConfigured: boolean,
+): { needed: boolean; reason: string | null } {
+  const sources = returnToSources(returnTo, origin);
+  if (!quotaConfigured) {
+    return {
+      needed: false,
+      reason: "Dedicated app quota is not configured on this deployment.",
+    };
+  }
+  if (matchingInstallation(installations, sources)) {
+    return { needed: false, reason: null };
+  }
+  if (sources.owners.length === 0 && sources.repos.length === 0) {
+    return installations.length === 0
+      ? { needed: true, reason: "Install the GitHub App for dedicated API quota." }
+      : { needed: false, reason: null };
+  }
+
+  if (sourceAccounts(sources).length > 1) {
+    return {
+      needed: false,
+      reason:
+        "Mixed-account dashboards use shared API quota; use one installed account per dashboard for dedicated quota.",
+    };
+  }
+
+  const uncoveredOwners = sources.owners.filter(
+    (owner) =>
+      !installations.some(
+        (installation) =>
+          installation.accountLogin === owner && installation.repositorySelection === "all",
+      ),
+  );
+  const uncoveredRepos = sources.repos.filter(
+    (repo) =>
+      !installations.some((installation) => {
+        const owner = repo.split("/")[0] ?? "";
+        return (
+          installation.accountLogin === owner &&
+          (installation.repositorySelection === "all" || installation.repositories.includes(repo))
+        );
+      }),
+  );
+
+  if (uncoveredOwners.length > 0 || uncoveredRepos.length > 0) {
+    const target = uncoveredOwners[0] ? `@${uncoveredOwners[0]}` : uncoveredRepos[0];
+    return {
+      needed: true,
+      reason: `Install the GitHub App for ${target} to use dedicated API quota.`,
+    };
+  }
+
+  return { needed: false, reason: null };
+}
+
+async function storedSessionCookie(env: Env, user: AuthUser, accessToken: string): Promise<string> {
+  if (!env.AUTH_COOKIE_SECRET) {
+    throw new Error("missing auth cookie secret");
+  }
+  if (!env.DASHBOARD_CACHE) {
+    throw new Error("missing auth session storage");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const id = randomNonce();
+  const exp = now + sessionMaxAgeSeconds;
+  const stored: StoredAuthSession = {
+    user,
+    accessToken,
+    iat: now,
+    exp,
+  };
+  await env.DASHBOARD_CACHE.put(`auth:session:${id}`, JSON.stringify(stored), {
+    expirationTtl: sessionMaxAgeSeconds,
+  });
+  const session = await signedJson(env.AUTH_COOKIE_SECRET, { id, exp });
+  return authCookie(session);
+}
+
 async function callbackResponse(request: Request, env: Env): Promise<Response> {
   if (!authConfigured(env) || !env.AUTH_COOKIE_SECRET) {
     return jsonResponse({ error: "GitHub login is not configured" }, 503, {
@@ -482,15 +910,25 @@ async function callbackResponse(request: Request, env: Env): Promise<Response> {
     }
     const accessToken = await exchangeCode(url, env);
     const user = await githubUser(accessToken);
-    const now = Math.floor(Date.now() / 1000);
-    const session = await signedJson(env.AUTH_COOKIE_SECRET, {
-      user,
-      iat: now,
-      exp: now + sessionMaxAgeSeconds,
-    });
-    return redirectResponse(state.returnTo, {
-      "set-cookie": authCookie(session),
-    });
+    const sessionCookieValue = await storedSessionCookie(env, user, accessToken);
+    const installations = await githubInstallations(accessToken).catch(() => []);
+    const coverage = sourceCoverage(
+      installations,
+      state.returnTo,
+      url.origin,
+      appTokenConfigured(env),
+    );
+    if (coverage.needed) {
+      const installReturn = await signedJson(env.AUTH_COOKIE_SECRET, {
+        returnTo: state.returnTo,
+        iat: Math.floor(Date.now() / 1000),
+        nonce: randomNonce(),
+      });
+      return redirectResponse(`https://github.com/apps/${appSlug(env)}/installations/new`, {
+        "set-cookie": [sessionCookieValue, installReturnCookieValue(installReturn)],
+      });
+    }
+    return redirectResponse(state.returnTo, { "set-cookie": sessionCookieValue });
   } catch (error) {
     return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400, {
       "cache-control": "no-store",
@@ -498,10 +936,47 @@ async function callbackResponse(request: Request, env: Env): Promise<Response> {
   }
 }
 
-function logoutResponse(request: Request): Response {
+async function logoutResponse(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+  if (env.AUTH_COOKIE_SECRET) {
+    const token = parseCookies(request).get(sessionCookie);
+    const session = token
+      ? await verifySignedJson<AuthSession>(env.AUTH_COOKIE_SECRET, token)
+      : null;
+    if (session?.id) {
+      await env.DASHBOARD_CACHE?.delete?.(`auth:session:${session.id}`);
+    }
+  }
   return redirectResponse(safeReturnTo(url.searchParams.get("returnTo")), {
     "set-cookie": authCookie("", 0),
+  });
+}
+
+async function installResponse(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  if (!env.AUTH_COOKIE_SECRET) {
+    return redirectResponse(`https://github.com/apps/${appSlug(env)}/installations/new`);
+  }
+
+  if (url.searchParams.has("installation_id") || url.searchParams.has("setup_action")) {
+    const token = parseCookies(request).get(installReturnCookie);
+    const state = token ? await verifySignedJson<AuthState>(env.AUTH_COOKIE_SECRET, token) : null;
+    const returnTo =
+      state && Math.floor(Date.now() / 1000) - state.iat <= stateMaxAgeSeconds
+        ? state.returnTo
+        : "/";
+    return redirectResponse(returnTo, {
+      "set-cookie": installReturnCookieValue("", 0),
+    });
+  }
+
+  const state = await signedJson(env.AUTH_COOKIE_SECRET, {
+    returnTo: safeReturnTo(url.searchParams.get("returnTo")),
+    iat: Math.floor(Date.now() / 1000),
+    nonce: randomNonce(),
+  });
+  return redirectResponse(`https://github.com/apps/${appSlug(env)}/installations/new`, {
+    "set-cookie": installReturnCookieValue(state),
   });
 }
 
@@ -509,9 +984,9 @@ async function authResponse(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/api/auth/login") return loginResponse(request, env);
   if (url.pathname === "/api/auth/callback") return callbackResponse(request, env);
-  if (url.pathname === "/api/auth/logout") return logoutResponse(request);
+  if (url.pathname === "/api/auth/logout") return logoutResponse(request, env);
   if (url.pathname === "/api/auth/install") {
-    return redirectResponse(`https://github.com/apps/${appSlug(env)}/installations/new`);
+    return installResponse(request, env);
   }
   return jsonResponse({ error: "not found" }, 404);
 }
@@ -573,7 +1048,7 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       includeRepos: dashboard.includeRepos,
       ...optionsFromUrl(dashboard.url),
       repoLimit,
-      token: env.GITHUB_TOKEN,
+      token: dashboard.token ?? env.GITHUB_TOKEN,
       fetch: workerFetch,
     });
     await writeCached(env, dashboard.key, payload);
@@ -675,11 +1150,17 @@ async function ownerResponse(
   });
   const cached = await readCached(env, key);
   const ageMs = cached ? Date.now() - Date.parse(cached.generatedAt) : Number.POSITIVE_INFINITY;
+  const tokenSources = { owners: ownerSlugs, repos: includeRepos };
+  const requestToken = () => requestInstallationToken(request, env, tokenSources);
 
   if (cached?.cache?.state === "error") {
-    const dashboard = cachedDashboardRequest(cached, includeRepos, key, url);
     context.waitUntil(
-      rebuild(dashboard, env).catch((error) => cacheBuildError(dashboard, env, error)),
+      requestToken()
+        .catch(() => null)
+        .then((token) => {
+          const dashboard = cachedDashboardRequest(cached, includeRepos, key, url, token);
+          return rebuild(dashboard, env).catch((error) => cacheBuildError(dashboard, env, error));
+        }),
     );
     return jsonResponse(cached, 502, {
       "cache-control": "no-store",
@@ -691,14 +1172,21 @@ async function ownerResponse(
   }
 
   if (cached) {
-    const dashboard = cachedDashboardRequest(cached, includeRepos, key, url);
-    context.waitUntil(rebuild(dashboard, env).catch(() => undefined));
+    context.waitUntil(
+      requestToken()
+        .catch(() => null)
+        .then((token) => {
+          const dashboard = cachedDashboardRequest(cached, includeRepos, key, url, token);
+          return rebuild(dashboard, env).catch(() => undefined);
+        }),
+    );
     return jsonResponse(withCacheState(cached, "stale"));
   }
 
+  const token = await requestToken().catch(() => null);
   let owners: Owner[] | null;
   try {
-    owners = await resolveOwners(ownerSlugs, env);
+    owners = await resolveOwners(ownerSlugs, env, token);
   } catch (error) {
     return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 502, {
       "cache-control": "no-store",
@@ -710,7 +1198,7 @@ async function ownerResponse(
     });
   }
 
-  const dashboard = dashboardRequest(owners, includeRepos, key, url);
+  const dashboard = dashboardRequest(owners, includeRepos, key, url, token);
   const build = rebuild(dashboard, env);
   try {
     const payload = await Promise.race([
@@ -744,8 +1232,9 @@ function cachedDashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
+  token?: string | null,
 ): DashboardRequest {
-  return dashboardRequest(payload.owners, includeRepos, key, url);
+  return dashboardRequest(payload.owners, includeRepos, key, url, token);
 }
 
 function dashboardRequest(
@@ -753,6 +1242,7 @@ function dashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
+  token?: string | null,
 ): DashboardRequest {
   return {
     owners,
@@ -760,6 +1250,7 @@ function dashboardRequest(
     subtitle: dashboardSubtitle(owners, includeRepos),
     key,
     url,
+    ...(token ? { token } : {}),
   };
 }
 

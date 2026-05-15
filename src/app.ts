@@ -46,8 +46,10 @@ const elements = {
   settingsButton: query<HTMLButtonElement>("#settingsButton"),
   settingsPanel: query<HTMLDivElement>("#settingsPanel"),
   settingsSummary: query<HTMLParagraphElement>("#settingsSummary"),
+  connectionStatus: query<HTMLParagraphElement>("#connectionStatus"),
   sourceForm: query<HTMLFormElement>("#sourceForm"),
   sourceInput: query<HTMLInputElement>("#sourceInput"),
+  installButton: query<HTMLButtonElement>("#installButton"),
   logoutButton: query<HTMLButtonElement>("#logoutButton"),
   ownerToggles: query<HTMLDivElement>("#ownerToggles"),
   repoToggles: query<HTMLDivElement>("#repoToggles"),
@@ -224,6 +226,12 @@ function login(): void {
   location.assign(loginUrl.toString());
 }
 
+function installApp(): void {
+  const installUrl = new URL(state.auth?.installUrl ?? "/api/auth/install", location.origin);
+  installUrl.searchParams.set("returnTo", currentReturnTo());
+  location.assign(installUrl.toString());
+}
+
 function logout(): void {
   const logoutUrl = new URL(state.auth?.logoutUrl ?? "/api/auth/logout", location.origin);
   logoutUrl.searchParams.set("returnTo", currentReturnTo());
@@ -235,6 +243,8 @@ function renderAuth(): void {
   if (!auth?.configured) {
     elements.accountLabel.textContent = "Login Unavailable";
     elements.accountButton.disabled = true;
+    elements.installButton.hidden = true;
+    elements.connectionStatus.textContent = "GitHub connection is not configured.";
     setAccountMenuOpen(false);
     return;
   }
@@ -242,8 +252,18 @@ function renderAuth(): void {
   elements.accountButton.disabled = false;
   if (auth.user) {
     elements.accountLabel.textContent = `@${auth.user.login}`;
+    elements.installButton.hidden = !auth.installNeeded;
+    elements.connectionStatus.textContent =
+      auth.installReason ??
+      (auth.quotaConfigured
+        ? `${auth.installations.length === 0 ? "Signed in." : `Connected to ${numberFormat.format(auth.installations.length)} GitHub App installation${auth.installations.length === 1 ? "" : "s"}.`}`
+        : "Signed in. Dedicated app quota is not configured on this deployment.");
   } else {
-    elements.accountLabel.textContent = "Log In";
+    elements.accountLabel.textContent = "Connect GitHub";
+    elements.installButton.hidden = true;
+    elements.connectionStatus.textContent = auth.quotaConfigured
+      ? "Connect GitHub to use dedicated API quota for dashboards you choose."
+      : "Connect GitHub to manage dashboard access.";
     setAccountMenuOpen(false);
   }
 }
@@ -498,7 +518,9 @@ async function fetchPayload(apiPath: string): Promise<Response> {
 
 async function loadAuth(): Promise<void> {
   try {
-    const response = await fetch("/api/me", { cache: "no-store" });
+    const url = new URL("/api/me", location.origin);
+    url.searchParams.set("returnTo", currentReturnTo());
+    const response = await fetch(url.toString(), { cache: "no-store" });
     if (response.ok) {
       state.auth = (await response.json()) as AuthPayload;
     }
@@ -587,6 +609,10 @@ elements.sourceInput.addEventListener("input", () => {
 elements.sourceForm.addEventListener("submit", (event) => {
   event.preventDefault();
   addSource(elements.sourceInput.value);
+});
+
+elements.installButton.addEventListener("click", () => {
+  installApp();
 });
 
 elements.logoutButton.addEventListener("click", () => {

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a combined GitHub connection flow that detects GitHub App installations and prompts installation for dedicated API quota only when needed.
 - Removed the always-on GitHub App install action from the account menu and tightened account menu styling.
 - Moved GitHub login state into a top-right account menu with settings and logout actions.
 - Added GitHub App login endpoints and settings UI state for signed-in users and app installation.

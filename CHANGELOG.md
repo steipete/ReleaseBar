@@ -4,6 +4,7 @@
 
 - Added a GitHub Hot root dashboard backed by cached GitHub repository search, with today/week/month/year and language filters.
 - Progressively cache API owner scans in 12-repository batches so huge organizations show rows while the dashboard keeps updating.
+- Improved version-column wrapping so long release tags do not collide with release dates in dev mode.
 - Made project owners link to their ReleaseBar dashboards while repository names still open GitHub.
 - Show cached partial source data while cold combined dashboards rebuild in the background.
 - Added owner-only public dashboard defaults so saved sources and visibility apply at clean owner URLs.

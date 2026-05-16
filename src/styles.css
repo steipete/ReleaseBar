@@ -892,6 +892,18 @@ body.dev-mode .dev-only {
   font-size: 12px;
 }
 
+.version-cell {
+  overflow: hidden;
+}
+
+.version-cell a {
+  display: block;
+  max-width: 100%;
+  padding-right: 6px;
+  overflow-wrap: anywhere;
+  line-height: 1.16;
+}
+
 .since-cell a,
 .since-cell {
   color: var(--amber);

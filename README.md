@@ -36,7 +36,7 @@ Set `GITHUB_TOKEN` for higher API limits. GitHub Actions uses the built-in token
 - GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; public dashboards still fall back to the shared server token and cache
 - private repositories are ignored even when selected in GitHub App installation; ReleaseBar only stores and renders public repository metadata
 
-The Worker in `worker/index.ts` serves both the static app shell and the generic owner API. It validates public GitHub owners, builds a capped public dashboard from the 12 most recently pushed public repositories per owner, stores dashboards and repo fragments in KV, serves fresh cache for 1h, serves stale cache while revalidating, and builds the root hot board from existing cached dashboards. A Durable Object binding prevents repeated cold requests from stampeding GitHub. Configure `DASHBOARD_CACHE`, `DASHBOARD_LOCKS`, and `GITHUB_TOKEN` before deploying the Worker.
+The Worker in `worker/index.ts` serves both the static app shell and the generic owner API. It validates public GitHub owners, progressively builds a capped public dashboard from the 200 most recently pushed public repositories per owner in 12-repository batches, stores dashboards and repo fragments in KV, serves fresh cache for 1h, serves stale or partial cache while revalidating, and builds the root hot board from existing cached dashboards. A Durable Object binding prevents repeated cold requests from stampeding GitHub. Configure `DASHBOARD_CACHE`, `DASHBOARD_LOCKS`, and `GITHUB_TOKEN` before deploying the Worker.
 
 ### GitHub App Login
 

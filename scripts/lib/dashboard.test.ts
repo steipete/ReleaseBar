@@ -280,9 +280,9 @@ test("dashboard project sorting handles dev issue and pull request counts numeri
 });
 
 test("worker builds root hot dashboard from cached dashboards", async () => {
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 4 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 4 });
-  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 4 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 5 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 5 });
+  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 5 });
   const env = {
     DASHBOARD_CACHE: kvStore({
       "hot:index:v3": JSON.stringify([alphaKey]),
@@ -337,7 +337,7 @@ test("worker builds root hot dashboard from cached dashboards", async () => {
           repoLimit: 200,
         },
       }),
-      [dashboardCacheKey({ owner: "gamma", schemaVersion: 4 })]: JSON.stringify(
+      [dashboardCacheKey({ owner: "gamma", schemaVersion: 5 })]: JSON.stringify(
         testDashboard("gamma", [
           testProject({
             owner: "gamma",
@@ -623,7 +623,7 @@ test("dashboard build records GitHub quota headers", async () => {
 });
 
 test("worker preserves cached quota metadata on fresh responses", async () => {
-  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 4 });
+  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 5 });
   const dashboard = testDashboard("owner", []);
   dashboard.generatedAt = new Date().toISOString();
   if (dashboard.cache) {
@@ -712,8 +712,8 @@ test("worker serves partial cached sources while combined dashboard rebuilds", a
       fetch: async () => new Response(null, { status: 409 }),
     }),
   };
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 4 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 4 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 5 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 5 });
 
   try {
     const response = await worker.fetch(
@@ -741,6 +741,97 @@ test("worker serves partial cached sources while combined dashboard rebuilds", a
     ]);
     assert.equal(body.totals.repos, 2);
     assert.equal(repoFetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker progressively resumes large owner dashboard builds from partial cache", async () => {
+  const originalFetch = globalThis.fetch;
+  const repos = Array.from({ length: 25 }, (_, index) => {
+    const name = `repo-${String(index + 1).padStart(2, "0")}`;
+    return {
+      owner: { login: "big" },
+      name,
+      full_name: `big/${name}`,
+      description: null,
+      html_url: `https://github.com/big/${name}`,
+      default_branch: "main",
+      language: null,
+      stargazers_count: 0,
+      forks_count: 0,
+      open_issues_count: 0,
+      archived: false,
+      pushed_at: `2026-05-${String(25 - index).padStart(2, "0")}T00:00:00Z`,
+      updated_at: `2026-05-${String(25 - index).padStart(2, "0")}T00:00:00Z`,
+      fork: false,
+      private: false,
+    };
+  });
+  const waitUntil: Promise<unknown>[] = [];
+  const context = {
+    waitUntil: (promise: Promise<unknown>) => {
+      waitUntil.push(promise);
+    },
+  };
+  const env = { DASHBOARD_CACHE: kvStore() };
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    if (path === "/users/big") {
+      return Response.json({ login: "big", type: "User" });
+    }
+    if (path === "/users/big/repos") {
+      return Response.json(repos);
+    }
+    if (path.endsWith("/releases")) {
+      return Response.json([
+        {
+          tag_name: "v1.0.0",
+          name: null,
+          html_url: "https://github.com/big/repo/releases/v1.0.0",
+          draft: false,
+          published_at: "2026-05-01T00:00:00Z",
+        },
+      ]);
+    }
+    if (path.endsWith("/commits/main")) {
+      return Response.json({
+        sha: "abcdef123456",
+        commit: { committer: { date: "2026-05-02T00:00:00Z" } },
+      });
+    }
+    if (path.includes("/compare/")) {
+      return Response.json({
+        total_commits: 0,
+        html_url: "https://github.com/big/repo/compare",
+      });
+    }
+    if (path.endsWith("/pulls")) {
+      return Response.json([]);
+    }
+    if (path.endsWith("/check-runs")) {
+      return Response.json({ check_runs: [] });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+
+  try {
+    const first = await worker.fetch(new Request("https://release.bar/api/big"), env, context);
+    const firstBody = (await first.json()) as DashboardPayload;
+    assert.equal(firstBody.cache?.state, "partial");
+    assert.equal(firstBody.cache?.progress?.scanned, 12);
+    assert.equal(firstBody.cache?.progress?.done, false);
+    assert.equal(firstBody.projects.length, 12);
+
+    await Promise.all(waitUntil.splice(0));
+
+    const second = await worker.fetch(new Request("https://release.bar/api/big"), env, context);
+    const secondBody = (await second.json()) as DashboardPayload;
+    assert.equal(secondBody.cache?.state, "fresh");
+    assert.equal(secondBody.cache?.progress?.done, true);
+    assert.equal(secondBody.projects.length, 25);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1600,18 +1691,18 @@ test("cache keys include owner, schema, and visibility flags", () => {
       includeForks: true,
       includeArchived: false,
       includeUnreleased: true,
-      schemaVersion: 4,
+      schemaVersion: 5,
     }),
-    "dashboard:v4:openclaw:forks-noarchived-unreleased",
+    "dashboard:v5:openclaw:forks-noarchived-unreleased",
   );
   assert.equal(
     dashboardCacheKey({
       owner: "openclaw",
       owners: ["Steipete"],
       repos: ["Steipete/Oracle"],
-      schemaVersion: 4,
+      schemaVersion: 5,
     }),
-    "dashboard:v4:openclaw:noforks-noarchived-released:sources-2dgec2fqc87xi",
+    "dashboard:v5:openclaw:noforks-noarchived-released:sources-2dgec2fqc87xi",
   );
   assert.equal(
     dashboardCacheKey({

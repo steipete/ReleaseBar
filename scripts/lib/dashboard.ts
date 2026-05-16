@@ -18,13 +18,20 @@ export type DashboardBuildOptions = {
   includeUnreleased?: boolean;
   excludeRepos?: string[];
   includeRepos?: string[];
+  initialProjects?: Project[];
+  skipRepos?: string[];
   repoLimit?: number;
   repoScanLimit?: number;
+  repoScanTarget?: number;
   token?: string;
   quotaSource?: ApiQuota["source"];
   quotaAccount?: string | null;
   fetch?: typeof fetch;
   projectCache?: ProjectCache;
+  onProgress?: (
+    payload: DashboardPayload,
+    progress: { scannedRepo: string; scanned: number; done: boolean },
+  ) => Promise<void> | void;
   log?: (message: string) => void;
 };
 
@@ -825,18 +832,83 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
     options.quotaSource,
     options.quotaAccount ?? null,
   );
-  const projects: Project[] = [];
+  const projects: Project[] = [...(options.initialProjects ?? [])];
   let capped = false;
+  let scanIncomplete = false;
+  let scannedThisRun = 0;
   const seen = new Set<string>();
+  const skippedRepos = new Set((options.skipRepos ?? []).map((repo) => repo.toLowerCase()));
+  for (const project of projects) {
+    seen.add(project.fullName.toLowerCase());
+  }
+
+  function payload(state: NonNullable<DashboardPayload["cache"]>["state"]): DashboardPayload {
+    const sortedProjects = [...projects].sort((a, b) => {
+      const aDate = a.pushedAt ? Date.parse(a.pushedAt) : 0;
+      const bDate = b.pushedAt ? Date.parse(b.pushedAt) : 0;
+      return bDate - aDate;
+    });
+    const generatedAt = new Date().toISOString();
+    const released = projects.filter((project) => project.releaseDate).length;
+    const scanned = skippedRepos.size + scannedThisRun;
+    const progress = options.repoScanTarget
+      ? {
+          scanned,
+          limit: options.repoScanTarget,
+          done: state !== "partial" && !scanIncomplete,
+        }
+      : undefined;
+    return {
+      title: options.title,
+      subtitle: options.subtitle,
+      canonicalDomain: options.canonicalDomain,
+      generatedAt,
+      owners: options.owners,
+      options: {
+        includeForks: options.includeForks,
+        includeArchived: options.includeArchived,
+        includeUnreleased: Boolean(options.includeUnreleased),
+        repoLimit: options.repoLimit ?? null,
+      },
+      cache: {
+        state,
+        stale: state !== "fresh",
+        capped,
+        repoLimit: options.repoLimit ?? null,
+        generatedAt,
+        quota: client.quota,
+        ...(progress ? { progress } : {}),
+        ...(progress && !progress.done
+          ? {
+              message: `scanned ${progress.scanned}${progress.limit ? `/${progress.limit}` : ""} recently pushed repos; still updating`,
+            }
+          : capped && options.repoScanLimit
+            ? {
+                message: `scanned ${options.repoScanLimit} recently pushed repos per owner`,
+              }
+            : {}),
+      },
+      totals: {
+        repos: sortedProjects.length,
+        released,
+        unreleased: sortedProjects.length - released,
+        commitsSinceRelease: sortedProjects.reduce(
+          (sum, project) => sum + (project.commitsSinceRelease || 0),
+          0,
+        ),
+      },
+      projects: sortedProjects,
+    };
+  }
 
   async function addRepo(repo: GitHubRepo, countLabel: string, force = false): Promise<void> {
     if (projects.some((project) => project.fullName === repo.full_name)) {
       return;
     }
-    if ((!force && seen.has(repo.full_name)) || !filterRepo(repo, options)) {
+    if ((!force && seen.has(repo.full_name.toLowerCase())) || !filterRepo(repo, options)) {
       return;
     }
-    seen.add(repo.full_name);
+    seen.add(repo.full_name.toLowerCase());
     options.log?.(`fetch ${countLabel} ${repo.full_name}`);
     const includeUnreleased = Boolean(options.includeUnreleased);
     const cached = await readProjectCache(options.projectCache, repo, includeUnreleased);
@@ -854,23 +926,45 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
   if (options.repoLimit) {
     for (const owner of options.owners) {
       const ownerStart = projects.length;
+      const ownerExisting = projects.filter(
+        (project) => project.owner.toLowerCase() === owner.login.toLowerCase(),
+      ).length;
       let scanned = 0;
       let page = 1;
       const scanLimit = options.repoScanLimit ?? Number.POSITIVE_INFINITY;
-      while (projects.length - ownerStart <= options.repoLimit && scanned < scanLimit) {
+      while (
+        ownerExisting + projects.length - ownerStart <= options.repoLimit &&
+        scanned < scanLimit
+      ) {
         const repos = await ownerRepos(client, owner, page);
         if (repos.length === 0) {
           break;
         }
         for (const repo of repos) {
+          if (skippedRepos.has(repo.full_name.toLowerCase())) {
+            continue;
+          }
           if (scanned >= scanLimit) {
             capped = true;
+            if (options.repoScanTarget) {
+              scanIncomplete = true;
+            }
             break;
           }
           scanned += 1;
-          const ownerCount = projects.length - ownerStart;
+          scannedThisRun += 1;
+          const ownerCount = ownerExisting + projects.length - ownerStart;
           await addRepo(repo, `${owner.login} ${ownerCount + 1}/${options.repoLimit}`);
-          if (projects.length - ownerStart > options.repoLimit) {
+          const progressPayload = payload("partial");
+          if (progressPayload.cache?.progress) {
+            progressPayload.cache.progress.done = false;
+          }
+          await options.onProgress?.(progressPayload, {
+            scannedRepo: repo.full_name,
+            scanned: skippedRepos.size + scannedThisRun,
+            done: false,
+          });
+          if (ownerExisting + projects.length - ownerStart > options.repoLimit) {
             capped = true;
             break;
           }
@@ -880,12 +974,15 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
         }
         if (scanned >= scanLimit) {
           capped = true;
+          if (options.repoScanTarget) {
+            scanIncomplete = true;
+          }
           break;
         }
         page += 1;
       }
-      if (projects.length - ownerStart > options.repoLimit) {
-        projects.splice(ownerStart + options.repoLimit);
+      if (ownerExisting + projects.length - ownerStart > options.repoLimit) {
+        projects.splice(ownerStart + Math.max(0, options.repoLimit - ownerExisting));
       }
     }
   } else {
@@ -912,48 +1009,10 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
     }
   }
 
-  projects.sort((a, b) => {
-    const aDate = a.pushedAt ? Date.parse(a.pushedAt) : 0;
-    const bDate = b.pushedAt ? Date.parse(b.pushedAt) : 0;
-    return bDate - aDate;
+  await options.onProgress?.(payload(scanIncomplete ? "partial" : "fresh"), {
+    scannedRepo: "",
+    scanned: skippedRepos.size + scannedThisRun,
+    done: !scanIncomplete,
   });
-
-  const generatedAt = new Date().toISOString();
-  const released = projects.filter((project) => project.releaseDate).length;
-  return {
-    title: options.title,
-    subtitle: options.subtitle,
-    canonicalDomain: options.canonicalDomain,
-    generatedAt,
-    owners: options.owners,
-    options: {
-      includeForks: options.includeForks,
-      includeArchived: options.includeArchived,
-      includeUnreleased: Boolean(options.includeUnreleased),
-      repoLimit: options.repoLimit ?? null,
-    },
-    cache: {
-      state: "fresh",
-      stale: false,
-      capped,
-      repoLimit: options.repoLimit ?? null,
-      generatedAt,
-      quota: client.quota,
-      ...(capped && options.repoScanLimit
-        ? {
-            message: `scanned ${options.repoScanLimit} recently pushed repos per owner`,
-          }
-        : {}),
-    },
-    totals: {
-      repos: projects.length,
-      released,
-      unreleased: projects.length - released,
-      commitsSinceRelease: projects.reduce(
-        (sum, project) => sum + (project.commitsSinceRelease || 0),
-        0,
-      ),
-    },
-    projects,
-  };
+  return payload(scanIncomplete ? "partial" : "fresh");
 }

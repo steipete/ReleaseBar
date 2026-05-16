@@ -86,10 +86,11 @@ const fullTtlMs = 60 * 60 * 1000;
 const staleTtlSeconds = 3 * 24 * 60 * 60;
 const installationTokenTtlSeconds = 50 * 60;
 const coldBuildWaitMs = 15 * 1000;
+const progressiveBuildBudgetMs = 25 * 1000;
 const buildLockTtlMs = 2 * 60 * 1000;
 const buildLockRefreshMs = 30 * 1000;
-const repoLimit = 12;
-const repoScanLimit = 12;
+const repoLimit = 200;
+const repoScanBatchSize = 12;
 const hotLimit = 50;
 const hotOwnerLimit = 3;
 const hotSourceLimit = 24;
@@ -98,8 +99,8 @@ const hotCacheTtlMs = 5 * 60 * 1000;
 const discoverLimit = 40;
 const discoverCacheTtlMs = 60 * 60 * 1000;
 const maxCustomSources = 8;
-const dashboardSchemaVersion = 4;
-const previousDashboardSchemaVersion = 3;
+const dashboardSchemaVersion = 5;
+const previousDashboardSchemaVersion = 4;
 const auxiliaryCacheSchemaVersion = 3;
 const dashboardCachePrefix = `dashboard:v${dashboardSchemaVersion}:`;
 const previousDashboardCachePrefix = `dashboard:v${previousDashboardSchemaVersion}:`;
@@ -152,6 +153,12 @@ type BuildLock = {
 type StoredBuildLock = {
   token: string;
   expiresAt: number;
+};
+
+type StoredBuildProgress = {
+  scannedRepos: string[];
+  projects: Project[];
+  updatedAt: string;
 };
 
 type AuthState = {
@@ -1102,6 +1109,7 @@ function withCacheState(
       repoLimit: payload.cache ? payload.cache.repoLimit : repoLimit,
       generatedAt: payload.generatedAt,
       ...(payload.cache?.quota ? { quota: payload.cache.quota } : {}),
+      ...(payload.cache?.progress ? { progress: payload.cache.progress } : {}),
       ...(cacheMessage ? { message: cacheMessage } : {}),
     },
   };
@@ -1198,6 +1206,29 @@ async function writeCached(
   await env.DASHBOARD_CACHE?.put(key, JSON.stringify(payload), {
     expirationTtl: ttlSeconds,
   });
+}
+
+function progressKey(key: string): string {
+  return `progress:v1:${key}`;
+}
+
+async function readProgress(env: Env, key: string): Promise<StoredBuildProgress | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(progressKey(key));
+  if (!raw) return null;
+  const parsed = tryJsonParse<StoredBuildProgress>(raw, `progress ${key}`);
+  return parsed && Array.isArray(parsed.scannedRepos) && Array.isArray(parsed.projects)
+    ? parsed
+    : null;
+}
+
+async function writeProgress(env: Env, key: string, progress: StoredBuildProgress): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(progressKey(key), JSON.stringify(progress), {
+    expirationTtl: staleTtlSeconds,
+  });
+}
+
+async function deleteProgress(env: Env, key: string): Promise<void> {
+  await env.DASHBOARD_CACHE?.delete?.(progressKey(key));
 }
 
 function projectActivityDate(project: Project): string | null {
@@ -1757,6 +1788,21 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
   }
 
   const promise = (async () => {
+    const storedProgress = await readProgress(env, dashboard.key);
+    const scannedRepos = new Set(storedProgress?.scannedRepos ?? []);
+    const progressProjects = storedProgress?.projects ?? [];
+    const saveProgress = async (payload: DashboardPayload, scannedRepo: string) => {
+      if (scannedRepo) {
+        scannedRepos.add(scannedRepo.toLowerCase());
+      }
+      const profiled = withProfile(payload, dashboard.profile);
+      await writeCached(env, dashboard.key, profiled);
+      await writeProgress(env, dashboard.key, {
+        scannedRepos: [...scannedRepos],
+        projects: profiled.projects,
+        updatedAt: profiled.generatedAt,
+      });
+    };
     const payload = await buildDashboard({
       title: "ReleaseBar",
       subtitle: dashboard.subtitle,
@@ -1766,17 +1812,30 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       excludeRepos: dashboard.profile?.hiddenRepos,
       ...optionsFromUrl(dashboard.url),
       repoLimit,
-      repoScanLimit,
+      repoScanLimit: repoScanBatchSize,
+      repoScanTarget: repoLimit,
+      initialProjects: progressProjects,
+      skipRepos: [...scannedRepos],
       token: dashboard.token ?? env.GITHUB_TOKEN,
       quotaSource:
         dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
       quotaAccount: dashboard.quotaAccount ?? null,
       fetch: workerFetch,
       projectCache: env.DASHBOARD_CACHE,
+      onProgress: (partial, progress) => saveProgress(partial, progress.scannedRepo),
     });
     const profiled = withProfile(payload, dashboard.profile);
     await writeCached(env, dashboard.key, profiled);
-    await rememberHotDashboard(env, dashboard.key, profiled);
+    if (profiled.cache?.progress?.done === false) {
+      await writeProgress(env, dashboard.key, {
+        scannedRepos: [...scannedRepos],
+        projects: profiled.projects,
+        updatedAt: profiled.generatedAt,
+      });
+    } else {
+      await deleteProgress(env, dashboard.key);
+      await rememberHotDashboard(env, dashboard.key, profiled);
+    }
     return profiled;
   })();
 
@@ -1805,6 +1864,17 @@ async function rebuildWithBuildLock(
   } finally {
     globalThis.clearInterval(refresh);
     await lock.release();
+  }
+}
+
+async function continueProgressiveBuild(dashboard: DashboardRequest, env: Env): Promise<void> {
+  const startedAt = Date.now();
+  let payload = await rebuildWithBuildLock(dashboard, env);
+  while (
+    payload?.cache?.progress?.done === false &&
+    Date.now() - startedAt < progressiveBuildBudgetMs
+  ) {
+    payload = await rebuildWithBuildLock(dashboard, env);
   }
 }
 
@@ -2039,7 +2109,7 @@ async function ownerResponse(
     });
   }
 
-  if (cached && ageMs < fullTtlMs) {
+  if (cached && cached.cache?.progress?.done !== false && ageMs < fullTtlMs) {
     return jsonResponse(withCacheState(cached, "fresh"));
   }
 
@@ -2049,10 +2119,11 @@ async function ownerResponse(
         .catch(() => null)
         .then((token) => {
           const dashboard = cachedDashboardRequest(cached, includeRepos, key, url, token);
-          return rebuildWithBuildLock(dashboard, env).catch(() => undefined);
+          return continueProgressiveBuild(dashboard, env).catch(() => undefined);
         }),
     );
-    return jsonResponse(withCacheState(cached, "stale"));
+    const state = cached.cache?.progress?.done === false ? "partial" : "stale";
+    return jsonResponse(withCacheState(cached, state));
   }
 
   const token = await requestToken().catch(() => null);
@@ -2088,7 +2159,21 @@ async function ownerResponse(
       }),
     ]);
     if (payload === buildPending || payload === null) {
-      context.waitUntil(build.catch((error) => cacheBuildError(dashboard, env, error)));
+      context.waitUntil(
+        build
+          .then((built) =>
+            built?.cache?.progress?.done === false
+              ? continueProgressiveBuild(dashboard, env)
+              : undefined,
+          )
+          .catch((error) => cacheBuildError(dashboard, env, error)),
+      );
+      const progressive = await readCached(env, key);
+      if (progressive?.projects.length) {
+        return jsonResponse(withCacheState(progressive, "partial"), 200, {
+          "cache-control": "no-store",
+        });
+      }
       const partial = await partialDashboardPayload(dashboard, env, ownerSlugs);
       if (partial) {
         return jsonResponse(partial, 200, {
@@ -2098,6 +2183,9 @@ async function ownerResponse(
       return jsonResponse(rebuildingPayload(dashboard, env), 202, {
         "cache-control": "no-store",
       });
+    }
+    if (payload.cache?.progress?.done === false) {
+      context.waitUntil(continueProgressiveBuild(dashboard, env).catch(() => undefined));
     }
     return jsonResponse(payload);
   } catch (error) {

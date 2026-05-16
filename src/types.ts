@@ -131,6 +131,11 @@ export type DashboardPayload = {
     generatedAt: string;
     quota?: ApiQuota;
     message?: string;
+    progress?: {
+      scanned: number;
+      limit: number | null;
+      done: boolean;
+    };
   };
   totals: {
     repos: number;

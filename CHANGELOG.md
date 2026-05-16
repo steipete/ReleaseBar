@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Exposed GitHub API quota source, remaining calls, and reset time in dashboard cache status.
 - Reduced GitHub API fanout with GraphQL repository metadata, KV-backed repo fragments, and Durable Object rebuild locking.
 - Made repository language tags clickable filters and exposed language filters in the command palette.
 - Added a dedicated loading state while empty dashboards are still being fetched and cached.

@@ -423,6 +423,85 @@ test("worker returns dashboard-shaped rate-limit errors without raw GitHub JSON"
   }
 });
 
+test("dashboard build records GitHub quota headers", async () => {
+  const resetAt = Math.floor(Date.parse("2026-05-15T13:00:00Z") / 1000);
+  const payload = await buildDashboard({
+    title: "ReleaseBar",
+    subtitle: "test",
+    canonicalDomain: "example.com",
+    owners: [{ type: "user", login: "owner" }],
+    includeForks: false,
+    includeArchived: false,
+    token: "installation-token",
+    quotaSource: "app",
+    quotaAccount: "owner",
+    repoLimit: 200,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/graphql") {
+        return Response.json(
+          {
+            data: {
+              repositoryOwner: {
+                __typename: "User",
+                repositories: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          },
+          {
+            headers: {
+              "x-ratelimit-limit": "5000",
+              "x-ratelimit-remaining": "4998",
+              "x-ratelimit-reset": String(resetAt),
+              "x-ratelimit-resource": "graphql",
+            },
+          },
+        );
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+  });
+
+  assert.equal(payload.cache?.quota?.source, "app");
+  assert.equal(payload.cache?.quota?.account, "owner");
+  assert.equal(payload.cache?.quota?.limit, 5000);
+  assert.equal(payload.cache?.quota?.remaining, 4998);
+  assert.equal(payload.cache?.quota?.resetAt, "2026-05-15T13:00:00.000Z");
+  assert.equal(payload.cache?.quota?.resource, "graphql");
+});
+
+test("worker preserves cached quota metadata on fresh responses", async () => {
+  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 2 });
+  const dashboard = testDashboard("owner", []);
+  dashboard.generatedAt = new Date().toISOString();
+  if (dashboard.cache) {
+    dashboard.cache.generatedAt = dashboard.generatedAt;
+    dashboard.cache.quota = {
+      source: "app",
+      account: "owner",
+      limit: 5000,
+      remaining: 4900,
+      resetAt: "2026-05-15T13:00:00.000Z",
+      resource: "graphql",
+    };
+  }
+
+  const response = await worker.fetch(
+    new Request("https://release.bar/api/owner"),
+    { DASHBOARD_CACHE: kvStore({ [key]: JSON.stringify(dashboard) }) },
+    { waitUntil: () => undefined },
+  );
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as DashboardPayload;
+  assert.equal(body.cache?.state, "fresh");
+  assert.equal(body.cache?.quota?.source, "app");
+  assert.equal(body.cache?.quota?.remaining, 4900);
+});
+
 test("worker returns rebuilding while another isolate owns the dashboard build lock", async () => {
   const originalFetch = globalThis.fetch;
   let repoFetches = 0;
@@ -913,17 +992,27 @@ test("worker uses GitHub App installation token for cold owner dashboards", asyn
     }
     if (url.pathname === "/graphql") {
       assert.equal(authorization, "Bearer installation-token");
-      return Response.json({
-        data: {
-          repositoryOwner: {
-            __typename: "Organization",
-            repositories: {
-              pageInfo: { hasNextPage: false, endCursor: null },
-              nodes: [],
+      return Response.json(
+        {
+          data: {
+            repositoryOwner: {
+              __typename: "Organization",
+              repositories: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
             },
           },
         },
-      });
+        {
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4997",
+            "x-ratelimit-reset": String(Math.floor(Date.parse("2026-05-15T13:00:00Z") / 1000)),
+            "x-ratelimit-resource": "graphql",
+          },
+        },
+      );
     }
     throw new Error(`unexpected fetch ${url.pathname}`);
   };
@@ -937,6 +1026,10 @@ test("worker uses GitHub App installation token for cold owner dashboards", asyn
     );
     assert.equal(response.status, 200);
     assert.equal(ownerResolvedWithInstallationToken, true);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.quota?.source, "app");
+    assert.equal(body.cache?.quota?.account, "openclaw");
+    assert.equal(body.cache?.quota?.remaining, 4997);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -1,4 +1,5 @@
 import type {
+  ApiQuota,
   CiState,
   DashboardPayload,
   Freshness,
@@ -19,6 +20,8 @@ export type DashboardBuildOptions = {
   includeRepos?: string[];
   repoLimit?: number;
   token?: string;
+  quotaSource?: ApiQuota["source"];
+  quotaAccount?: string | null;
   fetch?: typeof fetch;
   projectCache?: ProjectCache;
   log?: (message: string) => void;
@@ -103,6 +106,7 @@ type GitHubClient = {
   fetch: typeof fetch;
   headers: Record<string, string>;
   graphqlCursors: Map<string, Array<string | null | undefined>>;
+  quota: ApiQuota;
 };
 
 type GraphQLRepoNode = {
@@ -196,6 +200,40 @@ function rateLimitFromResponse(response: Response, pathname: string): GitHubRate
   );
 }
 
+function numberHeader(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resetAtHeader(headers: Headers): string | null {
+  const reset = numberHeader(headers, "x-ratelimit-reset");
+  return reset === null ? null : new Date(reset * 1000).toISOString();
+}
+
+function recordRateLimit(client: GitHubClient, response: Response): void {
+  const limit = numberHeader(response.headers, "x-ratelimit-limit");
+  const remaining = numberHeader(response.headers, "x-ratelimit-remaining");
+  const resetAt = resetAtHeader(response.headers);
+  const resource = response.headers.get("x-ratelimit-resource");
+  if (limit === null && remaining === null && resetAt === null && resource === null) {
+    return;
+  }
+
+  const replaceBucket =
+    remaining !== null && (client.quota.remaining === null || remaining <= client.quota.remaining);
+  client.quota = {
+    ...client.quota,
+    limit: replaceBucket ? (limit ?? client.quota.limit) : (client.quota.limit ?? limit),
+    remaining: replaceBucket ? remaining : client.quota.remaining,
+    resetAt: replaceBucket ? (resetAt ?? client.quota.resetAt) : (client.quota.resetAt ?? resetAt),
+    resource: replaceBucket
+      ? (resource ?? client.quota.resource)
+      : (client.quota.resource ?? resource),
+  };
+}
+
 export function normalizeBuildOptions(
   config: ReleaseBarConfig,
   overrides: Partial<DashboardBuildOptions> = {},
@@ -284,7 +322,12 @@ export function freshness(project: Pick<Project, "commitsSinceRelease">): Freshn
   return "hot";
 }
 
-function githubClient(token = "", fetcher: typeof fetch = fetch): GitHubClient {
+function githubClient(
+  token = "",
+  fetcher: typeof fetch = fetch,
+  quotaSource: ApiQuota["source"] = token ? "shared" : "anonymous",
+  quotaAccount: string | null = null,
+): GitHubClient {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "User-Agent": "ReleaseBar",
@@ -295,7 +338,19 @@ function githubClient(token = "", fetcher: typeof fetch = fetch): GitHubClient {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  return { fetch: fetcher, headers, graphqlCursors: new Map() };
+  return {
+    fetch: fetcher,
+    headers,
+    graphqlCursors: new Map(),
+    quota: {
+      source: quotaSource,
+      account: quotaAccount,
+      remaining: null,
+      limit: null,
+      resetAt: null,
+      resource: null,
+    },
+  };
 }
 
 async function github<T>(
@@ -306,6 +361,7 @@ async function github<T>(
   const response = await client.fetch(`https://api.github.com${pathname}`, {
     headers: client.headers,
   });
+  recordRateLimit(client, response);
   const rateLimit = rateLimitFromResponse(response, pathname);
   if (rateLimit) throw rateLimit;
   if (ignoreStatuses.includes(response.status)) {
@@ -356,6 +412,7 @@ async function githubGraphql<T>(
     },
     body: JSON.stringify({ query, variables }),
   });
+  recordRateLimit(client, response);
   const rateLimit = rateLimitFromResponse(response, "/graphql");
   if (rateLimit) throw rateLimit;
   if (!response.ok) {
@@ -502,6 +559,7 @@ async function githubCount(client: GitHubClient, pathname: string): Promise<numb
   const response = await client.fetch(`https://api.github.com${pathname}${joiner}per_page=1`, {
     headers: client.headers,
   });
+  recordRateLimit(client, response);
   if (response.status === 404) {
     return 0;
   }
@@ -751,7 +809,12 @@ export async function resolveOwnerType(
 }
 
 export async function buildDashboard(options: DashboardBuildOptions): Promise<DashboardPayload> {
-  const client = githubClient(options.token, options.fetch);
+  const client = githubClient(
+    options.token,
+    options.fetch,
+    options.quotaSource,
+    options.quotaAccount ?? null,
+  );
   const projects: Project[] = [];
   let capped = false;
   const seen = new Set<string>();
@@ -854,6 +917,7 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       capped,
       repoLimit: options.repoLimit ?? null,
       generatedAt,
+      quota: client.quota,
     },
     totals: {
       repos: projects.length,

@@ -22,6 +22,7 @@ import {
   type GitHubInstallationRepository,
 } from "./schemas.js";
 import type {
+  ApiQuota,
   AuthInstallation,
   AuthPayload,
   AuthUser,
@@ -115,6 +116,14 @@ type DashboardRequest = {
   key: string;
   url: URL;
   token?: string;
+  quotaSource?: ApiQuota["source"];
+  quotaAccount?: string | null;
+};
+
+type RequestToken = {
+  token: string;
+  quotaSource: "app";
+  quotaAccount: string | null;
 };
 
 type BuildLock = {
@@ -836,13 +845,20 @@ async function requestInstallationToken(
   request: Request,
   env: Env,
   sources: TokenSources,
-): Promise<string | null> {
+): Promise<RequestToken | null> {
   if (!appTokenConfigured(env)) return null;
   const session = await currentSession(request, env);
   if (!session) return null;
   const installations = await githubInstallations(session.accessToken);
   const installation = matchingInstallation(installations, sources);
-  return installation ? cachedInstallationToken(env, installation.id) : null;
+  const token = installation ? await cachedInstallationToken(env, installation.id) : null;
+  return token
+    ? {
+        token,
+        quotaSource: "app",
+        quotaAccount: installation?.accountLogin ?? null,
+      }
+    : null;
 }
 
 function sourceAccounts(sources: TokenSources): string[] {
@@ -1063,8 +1079,20 @@ function withCacheState(
       capped: payload.cache?.capped ?? false,
       repoLimit: payload.cache ? payload.cache.repoLimit : repoLimit,
       generatedAt: payload.generatedAt,
+      ...(payload.cache?.quota ? { quota: payload.cache.quota } : {}),
       ...(cacheMessage ? { message: cacheMessage } : {}),
     },
+  };
+}
+
+function quotaForDashboard(dashboard: DashboardRequest, env: Env): ApiQuota {
+  return {
+    source: dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
+    account: dashboard.quotaAccount ?? null,
+    remaining: null,
+    limit: null,
+    resetAt: null,
+    resource: null,
   };
 }
 
@@ -1347,6 +1375,9 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       ...optionsFromUrl(dashboard.url),
       repoLimit,
       token: dashboard.token ?? env.GITHUB_TOKEN,
+      quotaSource:
+        dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
+      quotaAccount: dashboard.quotaAccount ?? null,
       fetch: workerFetch,
       projectCache: env.DASHBOARD_CACHE,
     });
@@ -1392,12 +1423,14 @@ function unresolvedDashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
+  token?: RequestToken | null,
 ): DashboardRequest {
   return dashboardRequest(
     ownerSlugs.map((login) => ({ type: "user", login })),
     includeRepos,
     key,
     url,
+    token,
   );
 }
 
@@ -1443,6 +1476,7 @@ function statusPayload(
       capped: false,
       repoLimit,
       generatedAt,
+      quota: quotaForDashboard(dashboard, env),
       message,
     },
     totals: {
@@ -1526,9 +1560,9 @@ async function ownerResponse(
   const token = await requestToken().catch(() => null);
   let owners: Owner[] | null;
   try {
-    owners = await resolveOwners(ownerSlugs, env, token);
+    owners = await resolveOwners(ownerSlugs, env, token?.token);
   } catch (error) {
-    const dashboard = unresolvedDashboardRequest(ownerSlugs, includeRepos, key, url);
+    const dashboard = unresolvedDashboardRequest(ownerSlugs, includeRepos, key, url, token);
     const payload = errorPayload(dashboard, env, dashboardErrorMessage(error));
     await writeCached(env, key, payload, 5 * 60);
     return jsonResponse(payload, errorStatus(error), retryAfterHeaders(error));
@@ -1567,7 +1601,7 @@ function cachedDashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
-  token?: string | null,
+  token?: RequestToken | null,
 ): DashboardRequest {
   return dashboardRequest(payload.owners, includeRepos, key, url, token);
 }
@@ -1577,7 +1611,7 @@ function dashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
-  token?: string | null,
+  token?: RequestToken | null,
 ): DashboardRequest {
   return {
     owners,
@@ -1585,7 +1619,13 @@ function dashboardRequest(
     subtitle: dashboardSubtitle(owners, includeRepos),
     key,
     url,
-    ...(token ? { token } : {}),
+    ...(token
+      ? {
+          token: token.token,
+          quotaSource: token.quotaSource,
+          quotaAccount: token.quotaAccount,
+        }
+      : {}),
   };
 }
 

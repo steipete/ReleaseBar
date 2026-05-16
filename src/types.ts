@@ -91,6 +91,15 @@ export type AuthPayload = {
   appUrl: string;
 };
 
+export type ApiQuota = {
+  source: "app" | "shared" | "anonymous";
+  account: string | null;
+  remaining: number | null;
+  limit: number | null;
+  resetAt: string | null;
+  resource: string | null;
+};
+
 export type DashboardPayload = {
   title: string;
   subtitle: string;
@@ -109,6 +118,7 @@ export type DashboardPayload = {
     capped: boolean;
     repoLimit: number | null;
     generatedAt: string;
+    quota?: ApiQuota;
     message?: string;
   };
   totals: {

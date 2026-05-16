@@ -25,7 +25,7 @@
     type SortKey,
   } from "./dashboard-view.js";
   import { dashboardRoute, validRepoSlug } from "./routing.js";
-  import type { AuthPayload, DashboardPayload, Project } from "./types.js";
+  import type { ApiQuota, AuthPayload, DashboardPayload, Project } from "./types.js";
 
   const initialRoute = dashboardRoute(location.pathname, location.search);
   const storedDevMode = localStorage.getItem("releasedeck:dev-mode") === "true";
@@ -60,6 +60,10 @@
     month: "short",
     day: "numeric",
     year: "numeric",
+  });
+  const timeFormat = new Intl.DateTimeFormat("en", {
+    hour: "numeric",
+    minute: "2-digit",
   });
   const relativeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
@@ -158,6 +162,19 @@
     const months = Math.round(days / 30);
     if (Math.abs(months) < 18) return relativeFormat.format(months, "month");
     return relativeFormat.format(Math.round(months / 12), "year");
+  }
+
+  function relativeReset(value: string): string {
+    const time = Date.parse(value);
+    if (Number.isNaN(time)) return "";
+    const diffMs = time - Date.now();
+    if (Math.abs(diffMs) < 90 * 60 * 1000) {
+      return relativeFormat.format(Math.round(diffMs / 60000), "minute");
+    }
+    if (Math.abs(diffMs) < 36 * 60 * 60 * 1000) {
+      return `${relativeFormat.format(Math.round(diffMs / 3600000), "hour")} at ${timeFormat.format(new Date(time))}`;
+    }
+    return `${absoluteDate(value)} at ${timeFormat.format(new Date(time))}`;
   }
 
   function matchesBase(
@@ -332,6 +349,21 @@
     return project.ciState;
   }
 
+  function quotaLabel(quota: ApiQuota | undefined): string {
+    if (!quota) return "";
+    const source =
+      quota.source === "app"
+        ? `app quota${quota.account ? ` @${quota.account}` : ""}`
+        : quota.source === "shared"
+          ? "shared quota"
+          : "anonymous quota";
+    const remaining =
+      quota.remaining === null ? "" : `${numberFormat.format(quota.remaining)} left`;
+    const resetAt = quota.resetAt ? relativeReset(quota.resetAt) : "";
+    const reset = resetAt ? `reset ${resetAt}` : "";
+    return [source, remaining, reset].filter(Boolean).join(" · ");
+  }
+
   function updateStatus(): void {
     if (!data) return;
     const cacheState = data.cache?.state;
@@ -339,7 +371,8 @@
     const capped = data.cache?.capped
       ? ` · capped at ${numberFormat.format(data.cache.repoLimit ?? data.projects.length)}`
       : "";
-    generatedLabel = `updated ${relativeDate(data.generatedAt)}${cacheState ? ` · ${cacheState}` : ""}${stale}${capped}`;
+    const quota = quotaLabel(data.cache?.quota);
+    generatedLabel = `updated ${relativeDate(data.generatedAt)}${cacheState ? ` · ${cacheState}` : ""}${stale}${capped}${quota ? ` · ${quota}` : ""}`;
   }
 
   async function fetchPayload(apiPath: string): Promise<Response> {

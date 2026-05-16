@@ -169,6 +169,43 @@ h1 {
   box-shadow: 0 0 18px var(--green);
 }
 
+.discover-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: -8px 0 22px;
+}
+
+.discover-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.discover-group a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0 11px;
+  background: rgba(16, 19, 15, 0.82);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.discover-group a:hover,
+.discover-group a:focus-visible,
+.discover-group a.active {
+  border-color: var(--green);
+  color: var(--text);
+  outline: 0;
+}
+
+.discover-group a.active {
+  background: rgba(156, 255, 87, 0.075);
+}
+
 /* Console */
 
 .console {

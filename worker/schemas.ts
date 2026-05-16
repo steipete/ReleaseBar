@@ -50,6 +50,33 @@ export const gitHubInstallationTokenSchema = v.looseObject({
   message: v.optional(v.string()),
 });
 
+export const gitHubSearchRepositorySchema = v.looseObject({
+  name: v.string(),
+  full_name: v.string(),
+  private: v.optional(v.boolean()),
+  fork: v.optional(v.boolean()),
+  archived: v.optional(v.boolean()),
+  html_url: v.string(),
+  description: v.nullable(v.string()),
+  default_branch: v.optional(v.string()),
+  language: v.nullable(v.string()),
+  stargazers_count: v.optional(v.number()),
+  forks_count: v.optional(v.number()),
+  open_issues_count: v.optional(v.number()),
+  pushed_at: v.nullable(v.string()),
+  updated_at: v.nullable(v.string()),
+  owner: v.looseObject({
+    login: v.string(),
+  }),
+});
+
+export const gitHubSearchRepositoryListSchema = v.looseObject({
+  total_count: v.optional(v.number()),
+  incomplete_results: v.optional(v.boolean()),
+  items: v.optional(v.array(gitHubSearchRepositorySchema)),
+  message: v.optional(v.string()),
+});
+
 const authUserSchema = v.object({
   id: v.number(),
   login: v.string(),
@@ -72,6 +99,7 @@ export type GitHubOAuthUser = v.InferOutput<typeof gitHubOAuthUserSchema>;
 export type GitHubInstallation = v.InferOutput<typeof gitHubInstallationSchema>;
 export type GitHubInstallationRepository = v.InferOutput<typeof gitHubInstallationRepositorySchema>;
 export type GitHubInstallationToken = v.InferOutput<typeof gitHubInstallationTokenSchema>;
+export type GitHubSearchRepository = v.InferOutput<typeof gitHubSearchRepositorySchema>;
 
 export function parseGitHubResponse<TSchema extends v.GenericSchema>(
   schema: TSchema,

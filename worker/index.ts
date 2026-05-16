@@ -14,12 +14,14 @@ import {
   gitHubInstallationTokenSchema,
   gitHubOAuthTokenSchema,
   gitHubOAuthUserSchema,
+  gitHubSearchRepositoryListSchema,
   hotIndexSchema,
   parseGitHubResponse,
   safeJsonParse,
   storedAuthSessionSchema,
   tryJsonParse,
   type GitHubInstallationRepository,
+  type GitHubSearchRepository,
 } from "./schemas.js";
 import type {
   ApiQuota,
@@ -92,6 +94,8 @@ const hotOwnerLimit = 3;
 const hotSourceLimit = 24;
 const hotIndexLimit = 100;
 const hotCacheTtlMs = 5 * 60 * 1000;
+const discoverLimit = 40;
+const discoverCacheTtlMs = 60 * 60 * 1000;
 const maxCustomSources = 8;
 const schemaVersion = 2;
 const dashboardCachePrefix = `dashboard:v${schemaVersion}:`;
@@ -1444,6 +1448,248 @@ async function hotResponse(env: Env): Promise<Response> {
   return jsonResponse(payload);
 }
 
+type DiscoverPeriod = "day" | "week" | "month" | "year";
+
+const discoverPeriods = new Set<DiscoverPeriod>(["day", "week", "month", "year"]);
+
+function discoverPeriod(url: URL): DiscoverPeriod {
+  const raw = (url.searchParams.get("period") ?? "week").toLowerCase();
+  if (raw === "today") return "day";
+  return discoverPeriods.has(raw as DiscoverPeriod) ? (raw as DiscoverPeriod) : "week";
+}
+
+function discoverLanguage(url: URL): string {
+  const raw = (url.searchParams.get("lang") ?? "").trim();
+  return /^[a-z0-9+#.\-\s]{1,32}$/i.test(raw) ? raw : "";
+}
+
+function discoverCacheKey(period: DiscoverPeriod, language: string): string {
+  return `discover:v${schemaVersion}:${period}:${language.trim().toLowerCase() || "all"}`;
+}
+
+function discoverSince(period: DiscoverPeriod): string {
+  const days = period === "day" ? 1 : period === "week" ? 7 : period === "month" ? 30 : 365;
+  const date = new Date(Date.now() - days * 86400000);
+  return date.toISOString().slice(0, 10);
+}
+
+function discoverPeriodLabel(period: DiscoverPeriod): string {
+  return period === "day" ? "today" : `this ${period}`;
+}
+
+function discoverSearchQuery(period: DiscoverPeriod, language: string): string {
+  const minimumStars =
+    period === "day" ? 50 : period === "week" ? 100 : period === "month" ? 250 : 1000;
+  const parts = [
+    `stars:>${minimumStars}`,
+    `pushed:>=${discoverSince(period)}`,
+    "archived:false",
+    "fork:false",
+  ];
+  if (language) {
+    parts.push(`language:"${language.replaceAll('"', "")}"`);
+  }
+  return parts.join(" ");
+}
+
+function quotaFromResponse(response: Response, env: Env): ApiQuota {
+  const remaining = parseHeaderInt(response.headers.get("x-ratelimit-remaining"));
+  const limit = parseHeaderInt(response.headers.get("x-ratelimit-limit"));
+  const reset = parseHeaderInt(response.headers.get("x-ratelimit-reset"));
+  return {
+    source: env.GITHUB_TOKEN ? "shared" : "anonymous",
+    account: null,
+    remaining,
+    limit,
+    resetAt: reset === null ? null : new Date(reset * 1000).toISOString(),
+    resource: response.headers.get("x-ratelimit-resource"),
+  };
+}
+
+function parseHeaderInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function discoverFreshness(repo: GitHubSearchRepository): Project["freshness"] {
+  const stars = repo.stargazers_count ?? 0;
+  const pushedAt = repo.pushed_at ? Date.parse(repo.pushed_at) : 0;
+  const ageDays = pushedAt ? Math.max(0, (Date.now() - pushedAt) / 86400000) : 365;
+  if (stars >= 1000 && ageDays <= 7) return "hot";
+  if (stars >= 250 && ageDays <= 30) return "busy";
+  return "warm";
+}
+
+function discoverProject(repo: GitHubSearchRepository): Project {
+  const owner = repo.owner.login;
+  const fullName = repo.full_name;
+  const defaultBranch = repo.default_branch || "main";
+  const releaseUrl = `${repo.html_url}/releases`;
+  return {
+    owner,
+    name: repo.name,
+    fullName,
+    description: repo.description,
+    url: repo.html_url,
+    defaultBranch,
+    language: repo.language,
+    stars: repo.stargazers_count ?? 0,
+    forks: repo.forks_count ?? 0,
+    openIssues: repo.open_issues_count ?? 0,
+    openPullRequests: 0,
+    issuesUrl: `${repo.html_url}/issues`,
+    pullRequestsUrl: `${repo.html_url}/pulls`,
+    archived: repo.archived ?? false,
+    pushedAt: repo.pushed_at,
+    updatedAt: repo.updated_at,
+    latestCommitSha: defaultBranch,
+    latestCommitDate: repo.pushed_at,
+    version: "repo search",
+    releaseName: null,
+    releaseUrl,
+    releaseDate: null,
+    commitsSinceRelease: null,
+    compareUrl: null,
+    ciState: "unknown",
+    ciStatus: null,
+    ciConclusion: null,
+    ciWorkflow: null,
+    ciUrl: null,
+    ciRunDate: null,
+    freshness: discoverFreshness(repo),
+  };
+}
+
+function discoverErrorPayload(
+  period: DiscoverPeriod,
+  language: string,
+  env: Env,
+  error: unknown,
+): DashboardPayload {
+  const generatedAt = new Date().toISOString();
+  return {
+    title: "GitHub Hot",
+    subtitle: `GitHub repository search for ${language ? `${language} projects ` : "projects "}${discoverPeriodLabel(period)}.`,
+    canonicalDomain: env.RELEASEDECK_CANONICAL_DOMAIN ?? "release.bar",
+    generatedAt,
+    owners: [],
+    options: {
+      includeForks: false,
+      includeArchived: false,
+      includeUnreleased: true,
+      repoLimit: discoverLimit,
+    },
+    cache: {
+      state: "error",
+      stale: true,
+      capped: false,
+      repoLimit: discoverLimit,
+      generatedAt,
+      message: discoveryErrorMessage(error),
+    },
+    totals: dashboardTotals([]),
+    projects: [],
+  };
+}
+
+function discoveryErrorMessage(error: unknown): string {
+  if (isGitHubRateLimit(error)) {
+    return "GitHub repository search quota is exhausted. Try again after the search quota resets.";
+  }
+  return dashboardErrorMessage(error);
+}
+
+async function discoverPayload(
+  period: DiscoverPeriod,
+  language: string,
+  env: Env,
+): Promise<DashboardPayload> {
+  const search = new URL("https://api.github.com/search/repositories");
+  search.searchParams.set("q", discoverSearchQuery(period, language));
+  search.searchParams.set("sort", "stars");
+  search.searchParams.set("order", "desc");
+  search.searchParams.set("per_page", String(discoverLimit));
+
+  const response = await workerFetch(search.toString(), {
+    headers: {
+      accept: "application/vnd.github+json",
+      ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
+      "user-agent": "ReleaseBar",
+      "x-github-api-version": "2022-11-28",
+    },
+  });
+  const body = parseGitHubResponse(
+    gitHubSearchRepositoryListSchema,
+    await response.json(),
+    "repository search",
+  );
+  if (!response.ok) {
+    const message = body.message ?? `GitHub repository search failed: ${response.status}`;
+    if (response.status === 403 || /rate limit|secondary rate/i.test(message)) {
+      throw new GitHubRateLimitError(message, parseHeaderInt(response.headers.get("retry-after")));
+    }
+    throw new Error(message);
+  }
+
+  const projects = (body.items ?? [])
+    .filter((repo) => !repo.private && !repo.fork && !repo.archived)
+    .map(discoverProject);
+  const generatedAt = new Date().toISOString();
+  const total = body.total_count ?? projects.length;
+  return {
+    title: "GitHub Hot",
+    subtitle: `Popular public GitHub repositories active ${discoverPeriodLabel(period)}${
+      language ? ` in ${language}` : ""
+    }.`,
+    canonicalDomain: env.RELEASEDECK_CANONICAL_DOMAIN ?? "release.bar",
+    generatedAt,
+    owners: [],
+    options: {
+      includeForks: false,
+      includeArchived: false,
+      includeUnreleased: true,
+      repoLimit: discoverLimit,
+    },
+    cache: {
+      state: "fresh",
+      stale: false,
+      capped: total > projects.length,
+      repoLimit: discoverLimit,
+      generatedAt,
+      quota: quotaFromResponse(response, env),
+      message: "approximated with GitHub repository search; star velocity needs GH Archive",
+    },
+    totals: dashboardTotals(projects),
+    projects,
+  };
+}
+
+async function discoverResponse(env: Env, url: URL): Promise<Response> {
+  const period = discoverPeriod(url);
+  const language = discoverLanguage(url);
+  const key = discoverCacheKey(period, language);
+  const cached = await readCached(env, key);
+  const ageMs = cached ? Date.now() - Date.parse(cached.generatedAt) : Number.POSITIVE_INFINITY;
+  if (cached && ageMs < discoverCacheTtlMs) {
+    return jsonResponse(withCacheState(cached, "fresh"));
+  }
+
+  try {
+    const payload = await discoverPayload(period, language, env);
+    await writeCached(env, key, payload);
+    return jsonResponse(payload);
+  } catch (error) {
+    if (cached) {
+      return jsonResponse(
+        withCacheState(cached, "stale", `${discoveryErrorMessage(error)} Showing cached search.`),
+      );
+    }
+    const payload = discoverErrorPayload(period, language, env, error);
+    return jsonResponse(payload, errorStatus(error), retryAfterHeaders(error));
+  }
+}
+
 async function acquireBuildLock(env: Env, key: string): Promise<BuildLock | null> {
   if (!env.DASHBOARD_LOCKS) {
     return {
@@ -1987,6 +2233,9 @@ async function routeRequest(
   }
   if (url.pathname === "/api/_hot") {
     return hotResponse(env);
+  }
+  if (url.pathname === "/api/_discover") {
+    return discoverResponse(env, url);
   }
   if (url.pathname.startsWith("/api/")) {
     return ownerResponse(request, env, context);

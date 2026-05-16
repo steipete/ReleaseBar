@@ -24,12 +24,21 @@
     type SortDirection,
     type SortKey,
   } from "./dashboard-view.js";
-  import { dashboardRoute, ownerDashboardPath, validRepoSlug } from "./routing.js";
+  import {
+    dashboardRoute,
+    ownerDashboardPath,
+    validRepoSlug,
+    type DiscoverPeriod,
+  } from "./routing.js";
   import type { ApiQuota, AuthPayload, DashboardPayload, Project } from "./types.js";
 
   const initialRoute = dashboardRoute(location.pathname, location.search);
   const storedDevMode = localStorage.getItem("releasedeck:dev-mode") === "true";
-  const initialView = parseViewState(location.search, initialRoute.isDefault, storedDevMode);
+  const initialView = parseViewState(
+    location.search,
+    initialRoute.discoverPeriod === "releasebar",
+    storedDevMode,
+  );
   const routeScope = initialRoute.owner ?? "default";
   const hiddenOwnersKey = `releasedeck:${routeScope}:hidden-owners`;
   const hiddenReposKey = `releasedeck:${routeScope}:hidden-repos`;
@@ -69,6 +78,14 @@
     minute: "2-digit",
   });
   const relativeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const discoverPeriods: Array<{ value: DiscoverPeriod; label: string }> = [
+    { value: "day", label: "today" },
+    { value: "week", label: "week" },
+    { value: "month", label: "month" },
+    { value: "year", label: "year" },
+    { value: "releasebar", label: "releasebar" },
+  ];
+  const discoverLanguages = ["TypeScript", "Python", "Rust", "Go", "Swift"];
 
   $: label = data ? ownerLabel(data) : initialRoute.label;
   $: subtitle = data?.subtitle ?? "Release debt across recently requested public dashboards.";
@@ -132,6 +149,8 @@
   );
   $: document.body.classList.toggle("dev-mode", devMode);
   $: document.title = `${label} · ReleaseBar`;
+  $: activeDiscoverPeriod = initialRoute.discoverPeriod ?? "week";
+  $: activeDiscoverLanguage = initialRoute.discoverLanguage;
   $: syncViewState(query, language, filter, sortKey, sortDirection, devMode);
 
   function ownerLabel(payload: DashboardPayload): string {
@@ -398,6 +417,25 @@
     localStorage.setItem("releasedeck:dev-mode", String(devMode));
   }
 
+  function discoverHref(period: DiscoverPeriod, nextLanguage = activeDiscoverLanguage): string {
+    const params = new URLSearchParams();
+    if (period !== "week") params.set("period", period);
+    if (nextLanguage.trim() && period !== "releasebar") params.set("hotLang", nextLanguage.trim());
+    const search = params.toString();
+    return search ? `/?${search}` : "/";
+  }
+
+  function discoverLanguageHref(nextLanguage: string): string {
+    return discoverHref(
+      activeDiscoverPeriod,
+      discoverLanguageActive(nextLanguage) ? "" : nextLanguage,
+    );
+  }
+
+  function discoverLanguageActive(nextLanguage: string): boolean {
+    return activeDiscoverLanguage.toLowerCase() === nextLanguage.toLowerCase();
+  }
+
   function syncViewState(
     activeQuery: string,
     activeLanguage: string,
@@ -417,7 +455,7 @@
         sortDirection: activeSortDirection,
         devMode: devEnabled,
       },
-      initialRoute.isDefault,
+      initialRoute.discoverPeriod === "releasebar",
     );
     if (nextSearch === location.search) return;
     const nextUrl = `${location.pathname}${nextSearch}${location.hash}`;
@@ -700,11 +738,19 @@
       ...typedCommands,
       {
         actionId: "dashboard:home",
-        title: "Open ReleaseBar Hot",
+        title: "Open GitHub Hot",
         subTitle: "root dashboard",
         group: "Dashboards",
-        keywords: ["home", "root", "hot"],
+        keywords: ["home", "root", "hot", "discover", "trending"],
         onRun: () => location.assign("/"),
+      },
+      {
+        actionId: "dashboard:releasebar",
+        title: "Open ReleaseBar Hot",
+        subTitle: "cached dashboards",
+        group: "Dashboards",
+        keywords: ["home", "root", "releasebar", "cache"],
+        onRun: () => location.assign(discoverHref("releasebar")),
       },
       ...ownerCommands,
       ...languages.map(languageCommand),
@@ -860,6 +906,42 @@
       {/if}
     </div>
   </header>
+
+  {#if initialRoute.isDefault}
+    <nav class="discover-nav" aria-label="Discover GitHub repositories">
+      <div class="discover-group" aria-label="Time range">
+        {#each discoverPeriods as period}
+          <a
+            class:active={activeDiscoverPeriod === period.value}
+            href={discoverHref(period.value)}
+            aria-current={activeDiscoverPeriod === period.value ? "page" : undefined}
+          >
+            {period.label}
+          </a>
+        {/each}
+      </div>
+      {#if activeDiscoverPeriod !== "releasebar"}
+        <div class="discover-group" aria-label="Language">
+          <a
+            class:active={!activeDiscoverLanguage}
+            href={discoverHref(activeDiscoverPeriod, "")}
+            aria-current={!activeDiscoverLanguage ? "page" : undefined}
+          >
+            all
+          </a>
+          {#each discoverLanguages as discoverLanguage}
+            <a
+              class:active={discoverLanguageActive(discoverLanguage)}
+              href={discoverLanguageHref(discoverLanguage)}
+              aria-current={discoverLanguageActive(discoverLanguage) ? "page" : undefined}
+            >
+              {discoverLanguage}
+            </a>
+          {/each}
+        </div>
+      {/if}
+    </nav>
+  {/if}
 
   {#if settingsOpen}
     <div class="settings-panel" aria-label="Dashboard settings" data-open>

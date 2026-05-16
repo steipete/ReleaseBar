@@ -156,8 +156,21 @@ test("owner route parsing keeps root hot board and owners API-backed", () => {
   assert.equal(ownerDashboardPath("@Steipete"), "/steipete");
 
   assert.deepEqual(dashboardRoute("/", "").isDefault, true);
-  assert.equal(dashboardRoute("/", "").apiPath, `${workerApiOrigin}/api/_hot`);
-  assert.equal(dashboardRoute("/", "").fallbackApiPath, `${workersDevApiOrigin}/api/_hot`);
+  assert.equal(dashboardRoute("/", "").apiPath, `${workerApiOrigin}/api/_discover`);
+  assert.equal(dashboardRoute("/", "").fallbackApiPath, `${workersDevApiOrigin}/api/_discover`);
+  assert.equal(dashboardRoute("/", "").discoverPeriod, "week");
+  assert.equal(
+    dashboardRoute("/", "?period=day&hotLang=TypeScript").apiPath,
+    `${workerApiOrigin}/api/_discover?period=day&lang=TypeScript`,
+  );
+  assert.equal(
+    dashboardRoute("/", "?period=releasebar&hotLang=TypeScript").apiPath,
+    `${workerApiOrigin}/api/_hot`,
+  );
+  assert.equal(
+    dashboardRoute("/", "?period=day&lang=TypeScript").apiPath,
+    `${workerApiOrigin}/api/_discover?period=day`,
+  );
   assert.equal(dashboardRoute("/openclaw", "").apiPath, `${workerApiOrigin}/api/openclaw`);
   assert.equal(
     dashboardRoute("/openclaw", "?forks=true&archived=true&unreleased=true").apiPath,
@@ -231,6 +244,21 @@ test("dashboard view state restores search, filters, sorting, and dev columns", 
       false,
     ),
     "?owners=openclaw",
+  );
+  assert.equal(
+    viewStateSearch(
+      "?period=day&hotLang=TypeScript&lang=Swift",
+      {
+        query: "",
+        language: "",
+        filter: "all",
+        sortKey: "activity",
+        sortDirection: "desc",
+        devMode: false,
+      },
+      false,
+    ),
+    "?period=day&hotLang=TypeScript",
   );
 });
 
@@ -379,6 +407,125 @@ test("worker keeps hot owner route distinct from root hot API", async () => {
     assert.equal(response.status, 200);
     assert.equal(body.owners[0]?.login, "hot");
     assert.notEqual(body.title, "ReleaseBar Hot");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker serves cached GitHub discovery dashboards from repository search", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (input, init) => {
+    calls += 1;
+    const url = new URL(String(input));
+    assert.equal(url.pathname, "/search/repositories");
+    assert.match(url.searchParams.get("q") ?? "", /language:"TypeScript"/);
+    assert.match(url.searchParams.get("q") ?? "", /pushed:>=/);
+    assert.equal(url.searchParams.get("sort"), "stars");
+    assert.equal((init?.headers as Record<string, string>)?.authorization, "Bearer shared-token");
+    return Response.json(
+      {
+        total_count: 2,
+        incomplete_results: false,
+        items: [
+          {
+            name: "releasebar",
+            full_name: "acme/releasebar",
+            private: false,
+            fork: false,
+            archived: false,
+            html_url: "https://github.com/acme/releasebar",
+            description: "Release dashboard",
+            default_branch: "main",
+            language: "TypeScript",
+            stargazers_count: 1200,
+            forks_count: 42,
+            open_issues_count: 7,
+            pushed_at: "2026-05-16T12:00:00Z",
+            updated_at: "2026-05-16T12:00:00Z",
+            owner: { login: "acme" },
+          },
+        ],
+      },
+      {
+        headers: {
+          "x-ratelimit-remaining": "4999",
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-reset": "1770000000",
+          "x-ratelimit-resource": "search",
+        },
+      },
+    );
+  };
+  const env = {
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const first = await worker.fetch(
+      new Request("https://release.bar/api/_discover?period=week&lang=TypeScript"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(first.status, 200);
+    const body = (await first.json()) as DashboardPayload;
+    assert.equal(body.title, "GitHub Hot");
+    assert.equal(body.projects[0]?.fullName, "acme/releasebar");
+    assert.equal(body.projects[0]?.version, "repo search");
+    assert.equal(body.projects[0]?.openIssues, 7);
+    assert.equal(body.cache?.quota?.remaining, 4999);
+    assert.match(body.cache?.message ?? "", /repository search/);
+
+    const second = await worker.fetch(
+      new Request("https://release.bar/api/_discover?period=week&lang=TypeScript"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(second.status, 200);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker falls back to stale discovery cache when GitHub search is rate limited", async () => {
+  const originalFetch = globalThis.fetch;
+  const cached = testDashboard("cached", [testProject({ owner: "cached", name: "repo" })]);
+  const env = {
+    DASHBOARD_CACHE: kvStore({
+      "discover:v2:week:all": JSON.stringify({
+        ...cached,
+        title: "GitHub Hot",
+        owners: [],
+        generatedAt: "2020-01-01T00:00:00Z",
+      }),
+    }),
+  };
+  globalThis.fetch = async () =>
+    Response.json({ message: "API rate limit exceeded" }, { status: 403 });
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/_discover?period=week"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.state, "stale");
+    assert.equal(body.projects[0]?.fullName, "cached/repo");
+    assert.match(body.cache?.message ?? "", /cached search/);
+    assert.doesNotMatch(body.cache?.message ?? "", /install the app/i);
+
+    const coldResponse = await worker.fetch(
+      new Request("https://release.bar/api/_discover?period=month"),
+      { DASHBOARD_CACHE: kvStore() },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(coldResponse.status, 429);
+    const coldBody = (await coldResponse.json()) as DashboardPayload;
+    assert.equal(coldBody.cache?.state, "error");
+    assert.match(coldBody.cache?.message ?? "", /repository search quota is exhausted/);
+    assert.doesNotMatch(coldBody.cache?.message ?? "", /install the app/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

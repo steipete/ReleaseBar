@@ -280,12 +280,12 @@ test("dashboard project sorting handles dev issue and pull request counts numeri
 });
 
 test("worker builds root hot dashboard from cached dashboards", async () => {
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 2 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 2 });
-  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 2 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 3 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 3 });
+  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 3 });
   const env = {
     DASHBOARD_CACHE: kvStore({
-      "hot:index:v2": JSON.stringify([alphaKey]),
+      "hot:index:v3": JSON.stringify([alphaKey]),
       [alphaKey]: JSON.stringify(
         testDashboard("alpha", [
           testProject({
@@ -337,7 +337,7 @@ test("worker builds root hot dashboard from cached dashboards", async () => {
           repoLimit: 200,
         },
       }),
-      [dashboardCacheKey({ owner: "gamma", schemaVersion: 2 })]: JSON.stringify(
+      [dashboardCacheKey({ owner: "gamma", schemaVersion: 3 })]: JSON.stringify(
         testDashboard("gamma", [
           testProject({
             owner: "gamma",
@@ -493,7 +493,7 @@ test("worker falls back to stale discovery cache when GitHub search is rate limi
   const cached = testDashboard("cached", [testProject({ owner: "cached", name: "repo" })]);
   const env = {
     DASHBOARD_CACHE: kvStore({
-      "discover:v2:week:all": JSON.stringify({
+      "discover:v3:week:all": JSON.stringify({
         ...cached,
         title: "GitHub Hot",
         owners: [],
@@ -623,7 +623,7 @@ test("dashboard build records GitHub quota headers", async () => {
 });
 
 test("worker preserves cached quota metadata on fresh responses", async () => {
-  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 2 });
+  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 3 });
   const dashboard = testDashboard("owner", []);
   dashboard.generatedAt = new Date().toISOString();
   if (dashboard.cache) {
@@ -712,8 +712,8 @@ test("worker serves partial cached sources while combined dashboard rebuilds", a
       fetch: async () => new Response(null, { status: 409 }),
     }),
   };
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 2 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 2 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 3 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 3 });
 
   try {
     const response = await worker.fetch(

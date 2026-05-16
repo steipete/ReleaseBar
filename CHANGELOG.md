@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Added a GitHub Hot root dashboard backed by cached GitHub repository search, with today/week/month/year and language filters.
-- Capped API owner scans at the newest 200 public repositories so huge organizations build promptly instead of staying queued.
+- Capped API owner scans at the newest 50 public repositories so huge organizations build promptly instead of staying queued.
 - Made project owners link to their ReleaseBar dashboards while repository names still open GitHub.
 - Show cached partial source data while cold combined dashboards rebuild in the background.
 - Added owner-only public dashboard defaults so saved sources and visibility apply at clean owner URLs.
@@ -19,7 +19,7 @@
 - Added a `need attention` dashboard filter for hot and busy repositories, with the metric tile acting as a shortcut.
 - Migrated the app shell to Svelte/Vite with keyboard-accessible account dropdowns, a Cmd-K command palette, and tighter ReleaseBar-themed controls.
 - Hardened GitHub auth, cache, and rate-limit handling with validated API payloads, cached installation tokens, scoped visibility settings, and PR commit linting.
-- Raised owner dashboard builds from 8 to 200 public released repositories and made capped dashboards show the cap size.
+- Raised owner dashboard builds from 8 to 50 recent public repositories and made capped dashboards show the cap size.
 - Filtered GitHub App selected repositories to public repos before auth state, coverage checks, or dashboards can use them.
 - Fixed GitHub App install redirects to use the real `releasebar-app` app slug while keeping `release.bar` OAuth callbacks.
 - Changed the root dashboard to `ReleaseBar Hot`, built from cached public dashboards instead of the maintainer snapshot.

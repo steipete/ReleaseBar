@@ -280,9 +280,9 @@ test("dashboard project sorting handles dev issue and pull request counts numeri
 });
 
 test("worker builds root hot dashboard from cached dashboards", async () => {
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 3 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 3 });
-  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 3 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 4 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 4 });
+  const forksKey = dashboardCacheKey({ owner: "forks", includeForks: true, schemaVersion: 4 });
   const env = {
     DASHBOARD_CACHE: kvStore({
       "hot:index:v3": JSON.stringify([alphaKey]),
@@ -337,7 +337,7 @@ test("worker builds root hot dashboard from cached dashboards", async () => {
           repoLimit: 200,
         },
       }),
-      [dashboardCacheKey({ owner: "gamma", schemaVersion: 3 })]: JSON.stringify(
+      [dashboardCacheKey({ owner: "gamma", schemaVersion: 4 })]: JSON.stringify(
         testDashboard("gamma", [
           testProject({
             owner: "gamma",
@@ -623,7 +623,7 @@ test("dashboard build records GitHub quota headers", async () => {
 });
 
 test("worker preserves cached quota metadata on fresh responses", async () => {
-  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 3 });
+  const key = dashboardCacheKey({ owner: "owner", schemaVersion: 4 });
   const dashboard = testDashboard("owner", []);
   dashboard.generatedAt = new Date().toISOString();
   if (dashboard.cache) {
@@ -712,8 +712,8 @@ test("worker serves partial cached sources while combined dashboard rebuilds", a
       fetch: async () => new Response(null, { status: 409 }),
     }),
   };
-  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 3 });
-  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 3 });
+  const alphaKey = dashboardCacheKey({ owner: "alpha", schemaVersion: 4 });
+  const betaKey = dashboardCacheKey({ owner: "beta", schemaVersion: 4 });
 
   try {
     const response = await worker.fetch(

@@ -88,8 +88,8 @@ const installationTokenTtlSeconds = 50 * 60;
 const coldBuildWaitMs = 15 * 1000;
 const buildLockTtlMs = 2 * 60 * 1000;
 const buildLockRefreshMs = 30 * 1000;
-const repoLimit = 50;
-const repoScanLimit = 50;
+const repoLimit = 12;
+const repoScanLimit = 12;
 const hotLimit = 50;
 const hotOwnerLimit = 3;
 const hotSourceLimit = 24;
@@ -98,10 +98,14 @@ const hotCacheTtlMs = 5 * 60 * 1000;
 const discoverLimit = 40;
 const discoverCacheTtlMs = 60 * 60 * 1000;
 const maxCustomSources = 8;
-const schemaVersion = 3;
-const dashboardCachePrefix = `dashboard:v${schemaVersion}:`;
-const hotCacheKey = `hot:v${schemaVersion}`;
-const hotIndexKey = `hot:index:v${schemaVersion}`;
+const dashboardSchemaVersion = 4;
+const previousDashboardSchemaVersion = 3;
+const auxiliaryCacheSchemaVersion = 3;
+const dashboardCachePrefix = `dashboard:v${dashboardSchemaVersion}:`;
+const previousDashboardCachePrefix = `dashboard:v${previousDashboardSchemaVersion}:`;
+const dashboardCachePrefixes = [dashboardCachePrefix, previousDashboardCachePrefix];
+const hotCacheKey = `hot:v${auxiliaryCacheSchemaVersion}`;
+const hotIndexKey = `hot:index:v${auxiliaryCacheSchemaVersion}`;
 const sessionCookie = "rd_session";
 const installReturnCookie = "rd_install_return";
 const sessionMaxAgeSeconds = 30 * 24 * 60 * 60;
@@ -1271,7 +1275,7 @@ async function partialDashboardPayload(
       dashboardCacheKey({
         owner,
         ...options,
-        schemaVersion,
+        schemaVersion: dashboardSchemaVersion,
       }),
     ),
     ...dashboard.includeRepos.map((repo) =>
@@ -1279,7 +1283,7 @@ async function partialDashboardPayload(
         owner: "custom",
         repos: [repo],
         ...options,
-        schemaVersion,
+        schemaVersion: dashboardSchemaVersion,
       }),
     ),
   ];
@@ -1336,11 +1340,14 @@ async function readCachedDashboards(env: Env): Promise<DashboardPayload[]> {
   const dashboards: DashboardPayload[] = [];
   let keys = await readHotIndex(env);
   if (keys.length < hotSourceLimit && env.DASHBOARD_CACHE.list) {
-    const page = await env.DASHBOARD_CACHE.list({
-      prefix: dashboardCachePrefix,
-      limit: hotSourceLimit,
-    });
-    keys = [...new Set([...keys, ...page.keys.map((key) => key.name)])];
+    for (const prefix of dashboardCachePrefixes) {
+      if (keys.length >= hotSourceLimit) break;
+      const page = await env.DASHBOARD_CACHE.list({
+        prefix,
+        limit: hotSourceLimit,
+      });
+      keys = [...new Set([...keys, ...page.keys.map((key) => key.name)])];
+    }
   }
 
   for (const key of keys.slice(0, hotSourceLimit)) {
@@ -1365,7 +1372,9 @@ async function readHotIndex(env: Env): Promise<string[]> {
   const raw = await env.DASHBOARD_CACHE?.get(hotIndexKey);
   if (!raw) return [];
   const keys = safeJsonParse(hotIndexSchema, raw, "hot index");
-  return keys ? keys.filter((key) => key.startsWith(dashboardCachePrefix)) : [];
+  return keys
+    ? keys.filter((key) => dashboardCachePrefixes.some((prefix) => key.startsWith(prefix)))
+    : [];
 }
 
 async function rememberHotDashboard(
@@ -1465,7 +1474,7 @@ function discoverLanguage(url: URL): string {
 }
 
 function discoverCacheKey(period: DiscoverPeriod, language: string): string {
-  return `discover:v${schemaVersion}:${period}:${language.trim().toLowerCase() || "all"}`;
+  return `discover:v${auxiliaryCacheSchemaVersion}:${period}:${language.trim().toLowerCase() || "all"}`;
 }
 
 function discoverSince(period: DiscoverPeriod): string {
@@ -2007,7 +2016,7 @@ async function ownerResponse(
     repos: includeRepos,
     salt: profile?.updatedAt,
     ...options,
-    schemaVersion,
+    schemaVersion: dashboardSchemaVersion,
   });
   const cached = await readCached(env, key);
   const ageMs = cached ? Date.now() - Date.parse(cached.generatedAt) : Number.POSITIVE_INFINITY;

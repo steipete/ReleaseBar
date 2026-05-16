@@ -2123,7 +2123,9 @@ async function ownerResponse(
         }),
     );
     const state = cached.cache?.progress?.done === false ? "partial" : "stale";
-    return jsonResponse(withCacheState(cached, state));
+    return jsonResponse(withCacheState(cached, state), 200, {
+      "cache-control": "no-store",
+    });
   }
 
   const token = await requestToken().catch(() => null);
@@ -2186,6 +2188,9 @@ async function ownerResponse(
     }
     if (payload.cache?.progress?.done === false) {
       context.waitUntil(continueProgressiveBuild(dashboard, env).catch(() => undefined));
+      return jsonResponse(payload, 200, {
+        "cache-control": "no-store",
+      });
     }
     return jsonResponse(payload);
   } catch (error) {

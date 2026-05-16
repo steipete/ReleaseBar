@@ -733,6 +733,7 @@ test("worker serves partial cached sources while combined dashboard rebuilds", a
       { waitUntil: () => undefined },
     );
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
     const body = (await response.json()) as DashboardPayload;
     assert.equal(body.cache?.state, "partial");
     assert.deepEqual(body.projects.map((project) => project.fullName).sort(), [
@@ -820,6 +821,7 @@ test("worker progressively resumes large owner dashboard builds from partial cac
   try {
     const first = await worker.fetch(new Request("https://release.bar/api/big"), env, context);
     const firstBody = (await first.json()) as DashboardPayload;
+    assert.equal(first.headers.get("cache-control"), "no-store");
     assert.equal(firstBody.cache?.state, "partial");
     assert.equal(firstBody.cache?.progress?.scanned, 12);
     assert.equal(firstBody.cache?.progress?.done, false);

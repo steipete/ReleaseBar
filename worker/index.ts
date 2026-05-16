@@ -89,6 +89,7 @@ const coldBuildWaitMs = 15 * 1000;
 const buildLockTtlMs = 2 * 60 * 1000;
 const buildLockRefreshMs = 30 * 1000;
 const repoLimit = 200;
+const repoScanLimit = 200;
 const hotLimit = 50;
 const hotOwnerLimit = 3;
 const hotSourceLimit = 24;
@@ -1756,6 +1757,7 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       excludeRepos: dashboard.profile?.hiddenRepos,
       ...optionsFromUrl(dashboard.url),
       repoLimit,
+      repoScanLimit,
       token: dashboard.token ?? env.GITHUB_TOKEN,
       quotaSource:
         dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),

@@ -2487,6 +2487,103 @@ test("dashboard repo cap applies after release eligibility", async () => {
   assert.equal(payload.cache?.capped, true);
 });
 
+test("dashboard repo scan cap stops giant owners after recent repos", async () => {
+  const repo = (name: string) => ({
+    owner: { login: "owner" },
+    name,
+    full_name: `owner/${name}`,
+    description: null,
+    html_url: `https://github.com/owner/${name}`,
+    default_branch: "main",
+    language: null,
+    stargazers_count: 0,
+    forks_count: 0,
+    open_issues_count: 0,
+    archived: false,
+    pushed_at: null,
+    updated_at: null,
+    fork: false,
+    private: false,
+  });
+  const releaseFetches: string[] = [];
+
+  const payload = await buildDashboard({
+    title: "ReleaseBar",
+    subtitle: "test",
+    canonicalDomain: "example.com",
+    owners: [{ type: "user", login: "owner" }],
+    includeForks: false,
+    includeArchived: false,
+    repoLimit: 2,
+    repoScanLimit: 2,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/users/owner/repos") {
+        return Response.json([repo("empty-a"), repo("empty-b"), repo("released")]);
+      }
+      if (path.endsWith("/releases")) {
+        releaseFetches.push(path.split("/")[3] ?? "");
+        return Response.json([]);
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  });
+
+  assert.deepEqual(releaseFetches, ["empty-a", "empty-b"]);
+  assert.equal(payload.totals.repos, 0);
+  assert.equal(payload.cache?.capped, true);
+  assert.match(payload.cache?.message ?? "", /scanned 2 recently pushed repos/);
+});
+
+test("dashboard repo scan cap marks full page boundary truncation as capped", async () => {
+  const repo = (name: string) => ({
+    owner: { login: "owner" },
+    name,
+    full_name: `owner/${name}`,
+    description: null,
+    html_url: `https://github.com/owner/${name}`,
+    default_branch: "main",
+    language: null,
+    stargazers_count: 0,
+    forks_count: 0,
+    open_issues_count: 0,
+    archived: false,
+    pushed_at: null,
+    updated_at: null,
+    fork: false,
+    private: false,
+  });
+  const pages: string[] = [];
+
+  const payload = await buildDashboard({
+    title: "ReleaseBar",
+    subtitle: "test",
+    canonicalDomain: "example.com",
+    owners: [{ type: "user", login: "owner" }],
+    includeForks: false,
+    includeArchived: false,
+    repoLimit: 200,
+    repoScanLimit: 100,
+    fetch: async (url) => {
+      const parsed = new URL(String(url));
+      const path = parsed.pathname;
+      if (path === "/users/owner/repos") {
+        pages.push(parsed.searchParams.get("page") ?? "");
+        return Response.json(Array.from({ length: 100 }, (_, index) => repo(`empty-${index}`)));
+      }
+      if (path.endsWith("/releases")) {
+        return Response.json([]);
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  });
+
+  assert.deepEqual(pages, ["1"]);
+  assert.equal(payload.totals.repos, 0);
+  assert.equal(payload.cache?.capped, true);
+  assert.match(payload.cache?.message ?? "", /scanned 100 recently pushed repos/);
+});
+
 test("dashboard repo cap keeps paginating until eligible repos survive filters", async () => {
   const repo = (name: string, overrides = {}) => ({
     owner: { login: "owner" },

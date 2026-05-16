@@ -19,6 +19,7 @@ export type DashboardBuildOptions = {
   excludeRepos?: string[];
   includeRepos?: string[];
   repoLimit?: number;
+  repoScanLimit?: number;
   token?: string;
   quotaSource?: ApiQuota["source"];
   quotaAccount?: string | null;
@@ -853,13 +854,20 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
   if (options.repoLimit) {
     for (const owner of options.owners) {
       const ownerStart = projects.length;
+      let scanned = 0;
       let page = 1;
-      while (projects.length - ownerStart <= options.repoLimit) {
+      const scanLimit = options.repoScanLimit ?? Number.POSITIVE_INFINITY;
+      while (projects.length - ownerStart <= options.repoLimit && scanned < scanLimit) {
         const repos = await ownerRepos(client, owner, page);
         if (repos.length === 0) {
           break;
         }
         for (const repo of repos) {
+          if (scanned >= scanLimit) {
+            capped = true;
+            break;
+          }
+          scanned += 1;
           const ownerCount = projects.length - ownerStart;
           await addRepo(repo, `${owner.login} ${ownerCount + 1}/${options.repoLimit}`);
           if (projects.length - ownerStart > options.repoLimit) {
@@ -868,6 +876,10 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
           }
         }
         if (repos.length < 100) {
+          break;
+        }
+        if (scanned >= scanLimit) {
+          capped = true;
           break;
         }
         page += 1;
@@ -927,6 +939,11 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       repoLimit: options.repoLimit ?? null,
       generatedAt,
       quota: client.quota,
+      ...(capped && options.repoScanLimit
+        ? {
+            message: `scanned ${options.repoScanLimit} recently pushed repos per owner`,
+          }
+        : {}),
     },
     totals: {
       repos: projects.length,

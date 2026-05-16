@@ -19,7 +19,7 @@
   /* Shape */
   --radius: 8px;
   --control-height: 36px;
-  --account-width: clamp(136px, 18vw, 220px);
+  --account-width: clamp(176px, 18vw, 240px);
   --shadow: 0 18px 80px rgba(0, 0, 0, 0.45);
 
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -77,6 +77,19 @@ a:hover {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.5;
+}
+
+.subtitle-link {
+  color: var(--text);
+  text-decoration-color: var(--line-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.subtitle-link:hover,
+.subtitle-link:focus-visible {
+  color: var(--green);
+  text-decoration-color: currentColor;
 }
 
 .eyebrow {
@@ -393,14 +406,25 @@ button:focus-visible {
 
 .account-button {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 8px;
   width: var(--account-width);
   max-width: calc(100vw - 32px);
   flex: 0 0 auto;
   align-items: center;
   border-color: var(--line-strong);
-  padding: 0 14px;
+  padding: 0 12px;
   color: var(--text);
+}
+
+.account-avatar {
+  grid-column: 1;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(232, 244, 223, 0.28);
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--panel-2);
 }
 
 .account-label {
@@ -410,6 +434,7 @@ button:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: center;
 }
 
 .account-caret {

@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Added a GitHub Hot root dashboard backed by cached GitHub repository search, with today/week/month/year and language filters.
+- Show signed-in GitHub avatars in the account menu trigger.
+- Linked single-owner dashboard subtitles to the GitHub user or organization.
 - Progressively cache API owner scans in 12-repository batches so huge organizations show rows while the dashboard keeps updating.
 - Improved version-column wrapping so long release tags do not collide with release dates in dev mode.
 - Made project owners link to their ReleaseBar dashboards while repository names still open GitHub.

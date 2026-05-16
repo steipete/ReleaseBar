@@ -89,6 +89,16 @@
 
   $: label = data ? ownerLabel(data) : initialRoute.label;
   $: subtitle = data?.subtitle ?? "Release debt across recently requested public dashboards.";
+  $: profileSourceCount =
+    (data?.profile?.includeOwners.length ?? 0) + (data?.profile?.includeRepos.length ?? 0);
+  $: subtitleOwner =
+    !initialRoute.isDefault &&
+    initialRoute.owner &&
+    initialRoute.extraOwners.length === 0 &&
+    initialRoute.repos.length === 0 &&
+    (!data || (data.owners.length === 1 && profileSourceCount === 0))
+      ? (data?.owners[0]?.login ?? initialRoute.owner)
+      : null;
   $: includeArchived = data?.options?.includeArchived === true;
   $: visibleProjects = data
     ? data.projects.filter((project) =>
@@ -857,7 +867,16 @@
     <div>
       <a class="eyebrow" href="/">ReleaseBar</a>
       <h1>{label}</h1>
-      <p class="subtitle">{subtitle}</p>
+      <p class="subtitle">
+        {#if subtitleOwner}
+          Release freshness for
+          <a class="subtitle-link" href={`https://github.com/${subtitleOwner}`} target="_blank" rel="noreferrer">
+            @{subtitleOwner}</a
+          >.
+        {:else}
+          {subtitle}
+        {/if}
+      </p>
     </div>
     <div class="top-actions">
       <button
@@ -875,6 +894,7 @@
       {#if auth?.user}
         <DropdownMenu.Root>
           <DropdownMenu.Trigger class="account-button">
+            <img class="account-avatar" src={auth.user.avatarUrl} alt="" width="24" height="24" loading="lazy" />
             <span class="account-label">@{auth.user.login}</span>
             <span class="account-caret" aria-hidden="true"></span>
           </DropdownMenu.Trigger>

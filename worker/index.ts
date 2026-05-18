@@ -634,10 +634,10 @@ async function assetResponse(request: Request, env: Env): Promise<Response> {
     const label = socialLabel(originalUrl);
     const image = `${originalUrl.origin}/og/${encodeURIComponent(label)}.svg`;
     const html = (await response.text())
-      .replace(/<title>.*?<\/title>/, `<title>${escapeHtml(label)} · ReleaseBar</title>`)
+      .replace(/<title>.*?<\/title>/, `<title>${escapeHtml(label)} · release.bar</title>`)
       .replace(
         /<meta property="og:title" content="[^"]*" \/>/,
-        `<meta property="og:title" content="${escapeHtml(label)} · ReleaseBar" />`,
+        `<meta property="og:title" content="${escapeHtml(label)} · release.bar" />`,
       )
       .replace(
         /<meta property="og:url" content="[^"]*" \/>/,
@@ -649,7 +649,7 @@ async function assetResponse(request: Request, env: Env): Promise<Response> {
       )
       .replace(
         /<meta name="twitter:title" content="[^"]*" \/>/,
-        `<meta name="twitter:title" content="${escapeHtml(label)} · ReleaseBar" />`,
+        `<meta name="twitter:title" content="${escapeHtml(label)} · release.bar" />`,
       )
       .replace(
         /<meta name="twitter:image" content="[^"]*" \/>/,

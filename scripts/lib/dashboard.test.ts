@@ -618,7 +618,7 @@ test("worker serves escaped dotted repository detail paths as app shell", async 
 
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /openclaw\/react\.dev · ReleaseBar/);
+  assert.match(html, /openclaw\/react\.dev · release\.bar/);
 });
 
 test("worker social cards include owner avatars and repository release metrics", async () => {

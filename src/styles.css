@@ -211,6 +211,10 @@ a:hover {
   text-transform: uppercase;
 }
 
+.eyebrow.brand {
+  text-transform: none;
+}
+
 .eyebrow:hover,
 .eyebrow:focus-visible {
   color: var(--text);

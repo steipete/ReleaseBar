@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a light mode theme with a sun/moon toggle in the top-right header; defaults to dark and persists per browser.
 - Reused source-owned GitHub App installation quota for anonymous public dashboard refreshes and added structured token-use audit logs.
 - Switched AI summaries to OpenAI's `chat-latest` API alias for GPT-5.5 Instant.
 - Added recent-work AI summaries to repository detail pages, including unreleased repositories and a since-release toggle for released repositories.

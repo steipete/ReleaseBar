@@ -37,7 +37,7 @@ Set `GITHUB_TOKEN` for higher API limits. GitHub Actions uses the built-in token
 - settings can hide visible owners or repos locally without changing the shared cache
 - GitHub App login uses `/api/auth/login`, `/api/auth/callback`, `/api/auth/install`, `/api/auth/logout`, and `/api/me`
 - `Connect GitHub` signs the user in, checks GitHub App installations, and sends them to install the app when the current dashboard source is not covered
-- GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; public dashboards still fall back to the shared server token and cache
+- GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; once an account installation is known, public refreshes for that account can use its app quota even for anonymous viewers
 - private repositories are ignored even when selected in GitHub App installation; ReleaseBar only stores and renders public repository metadata
 - the need-attention metric filters repos with unreleased commits, stale releases, failing/cancelled CI, or issue/PR pressure and rows show the reason inline
 - repository detail pages include release cadence, recent releases, contributors, languages, commit/churn charts, and 30-day issue/PR trend counts when GitHub provides them
@@ -52,9 +52,11 @@ The Worker in `worker/index.ts` serves both the static app shell and the generic
 - `GET /api/repos/:owner/:repo` returns repository detail stats
 - `GET /api/_discover` and `GET /api/_hot` power the root dashboard
 
-Dashboard builds validate public GitHub owners, scan up to the 200 most recently pushed public repositories per owner, and hydrate repositories in 12-repository batches. Dashboard payloads, repo fragments, hot boards, profile settings, and auth session data live in Cloudflare KV. A Durable Object binding (`DASHBOARD_LOCKS`) prevents repeated cold requests from stampeding GitHub.
+Dashboard builds validate public GitHub owners, scan up to the 200 most recently pushed public repositories per owner, and hydrate repositories in 12-repository batches. Dashboard payloads, repo fragments, hot boards, app-installation coverage, profile settings, and auth session data live in Cloudflare KV. A Durable Object binding (`DASHBOARD_LOCKS`) prevents repeated cold requests from stampeding GitHub.
 
 Fresh dashboard cache is served for about 1h. Stale or partial cache is shown while a background rebuild continues, so large owners can show useful rows before all release data finishes. Dashboard records are retained longer than the fresh window so older public data can remain visible during GitHub outages or rate limits, with the UI marking stale/partial state.
+
+The Worker writes structured `github_token_use` and `github_installation_token` logs without token values. Use Cloudflare Worker tail/logs to audit which area, route, quota source, account, status, and remaining rate-limit bucket handled public GitHub requests.
 
 ### GitHub App Login
 

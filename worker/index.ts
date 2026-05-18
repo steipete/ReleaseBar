@@ -195,6 +195,16 @@ type RequestToken = {
   quotaAccount: string | null;
 };
 
+type GitHubAuditArea =
+  | "dashboard"
+  | "discover"
+  | "owner-activity"
+  | "repo-activity"
+  | "repo-detail"
+  | "release-summary"
+  | "social-card"
+  | "auth";
+
 type ProfileInput = {
   includeOwners?: unknown;
   includeRepos?: unknown;
@@ -243,11 +253,115 @@ type StoredAuthSession = {
   installationsUpdatedAt?: string;
 };
 
+const storedInstallationSchema = v.object({
+  id: v.number(),
+  accountLogin: v.string(),
+  accountType: v.picklist(["user", "org"]),
+  accountUrl: v.string(),
+  avatarUrl: v.string(),
+  repositorySelection: v.picklist(["all", "selected"]),
+  repositories: v.array(v.string()),
+  updatedAt: v.optional(v.string()),
+});
+
+type StoredInstallationRecord = AuthInstallation & {
+  updatedAt?: string;
+};
+
 function isPublicInstallationRepository(repo: GitHubInstallationRepository): boolean {
   if (repo.private === true) {
     return false;
   }
   return repo.private === false || repo.visibility === "public";
+}
+
+function installationRegistryKey(accountLogin: string): string {
+  return `auth:installation:v1:${slugOwner(accountLogin)}`;
+}
+
+function installationMissKey(accountLogin: string): string {
+  return `auth:installation-miss:v1:${slugOwner(accountLogin)}`;
+}
+
+function normalizedInstallation(installation: AuthInstallation): StoredInstallationRecord {
+  return {
+    ...installation,
+    accountLogin: slugOwner(installation.accountLogin),
+    repositories: installation.repositories.map((repo) => repo.toLowerCase()).filter(validRepoSlug),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function writeInstallationRegistry(
+  env: Env,
+  installations: AuthInstallation[],
+): Promise<void> {
+  if (!env.DASHBOARD_CACHE) return;
+  await Promise.all(
+    installations.map((installation) => {
+      const normalized = normalizedInstallation(installation);
+      return env.DASHBOARD_CACHE!.put(
+        installationRegistryKey(normalized.accountLogin),
+        JSON.stringify(normalized),
+        { expirationTtl: dashboardStorageTtlSeconds },
+      );
+    }),
+  );
+}
+
+async function readInstallationRegistry(
+  env: Env,
+  accountLogin: string,
+): Promise<StoredInstallationRecord | null> {
+  const account = slugOwner(accountLogin);
+  if (!validOwnerSlug(account)) return null;
+  const raw = await env.DASHBOARD_CACHE?.get(installationRegistryKey(account));
+  if (!raw) return null;
+  return safeJsonParse(storedInstallationSchema, raw, `app installation ${account}`);
+}
+
+function auditGitHubTokenUse(
+  area: GitHubAuditArea,
+  path: string,
+  status: number,
+  quota: ApiQuota,
+): void {
+  console.log(
+    JSON.stringify({
+      event: "github_token_use",
+      area,
+      path,
+      status,
+      quota: {
+        source: quota.source,
+        account: quota.account,
+        remaining: quota.remaining,
+        limit: quota.limit,
+        resetAt: quota.resetAt,
+        resource: quota.resource,
+      },
+    }),
+  );
+}
+
+function auditGitHubFetch(
+  area: GitHubAuditArea,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+): typeof fetch {
+  return async (input, init) => {
+    const response = await workerFetch(input, init);
+    const url = new URL(String(input));
+    if (url.hostname === "api.github.com") {
+      auditGitHubTokenUse(
+        area,
+        `${url.pathname}${url.search}`,
+        response.status,
+        quotaFromGitHubResponse(response, quotaSource, quotaAccount),
+      );
+    }
+    return response;
+  };
 }
 
 type TokenSources = {
@@ -487,11 +601,13 @@ async function resolveOwners(
   ownerSlugs: string[],
   env: Env,
   token?: string | null,
+  quotaSource: ApiQuota["source"] = token || env.GITHUB_TOKEN ? "shared" : "anonymous",
+  quotaAccount: string | null = null,
 ): Promise<Owner[] | null> {
   const owners: Owner[] = [];
   for (const owner of ownerSlugs) {
     const resolved = await resolveOwnerType(owner, {
-      fetch: workerFetch,
+      fetch: auditGitHubFetch("dashboard", quotaSource, quotaAccount),
       token: token ?? env.GITHUB_TOKEN,
     });
     if (!resolved) {
@@ -666,7 +782,7 @@ async function buildSocialRepoProject(
   env: Env,
 ): Promise<Project | null> {
   const fullName = `${slugOwner(owner)}/${repoName.toLowerCase()}`;
-  const requestToken = await requestInstallationToken(request, env, {
+  const requestToken = await bestInstallationToken(request, env, {
     owners: [],
     repos: [fullName],
   }).catch(() => null);
@@ -683,6 +799,7 @@ async function buildSocialRepoProject(
     quotaSource,
     quotaAccount,
     onQuota,
+    "social-card",
   );
   if (repo.private) return null;
   const releases = await detailGitHubJson(
@@ -693,6 +810,7 @@ async function buildSocialRepoProject(
     quotaSource,
     quotaAccount,
     onQuota,
+    "social-card",
   );
   const latestRelease = releases.find((release) => !release.draft) ?? null;
   const compare = latestRelease
@@ -705,6 +823,7 @@ async function buildSocialRepoProject(
           quotaSource,
           quotaAccount,
           onQuota,
+          "social-card",
         ),
         null,
       )
@@ -1149,10 +1268,12 @@ async function resolvedInstallations(
     )
       ? []
       : await githubAppInstallationsForSession(env, session).catch(() => []);
-  return mergeInstallations(liveInstallations ?? [], [
+  const installations = mergeInstallations(liveInstallations ?? [], [
     ...acknowledgedInstallations,
     ...appInstallations,
   ]);
+  await writeInstallationRegistry(env, installations);
+  return installations;
 }
 
 function inferredInstallation(
@@ -1210,6 +1331,60 @@ async function githubAppInstallation(
     repositorySelection: installation.repository_selection,
     repositories,
   };
+}
+
+async function githubAppInstallationForAccount(
+  env: Env,
+  accountLogin: string,
+): Promise<AuthInstallation | null> {
+  if (!appTokenConfigured(env) || !env.DASHBOARD_CACHE) return null;
+  const account = slugOwner(accountLogin);
+  if (!validOwnerSlug(account)) return null;
+  if (await env.DASHBOARD_CACHE.get(installationMissKey(account))) return null;
+  const jwt = await githubAppJwt(env);
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await workerFetch(
+      `https://api.github.com/app/installations?per_page=100&page=${page}`,
+      {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${jwt}`,
+          "user-agent": "ReleaseBar",
+          "x-github-api-version": "2022-11-28",
+        },
+      },
+    );
+    if (!response.ok) break;
+    const result = parseGitHubResponse(
+      v.array(gitHubInstallationSchema),
+      await response.json(),
+      "app installation list",
+    );
+    for (const installation of result) {
+      const installationAccount = installation.account;
+      if (!installationAccount || installationAccount.login.toLowerCase() !== account) continue;
+      const repositories =
+        installation.repository_selection === "selected"
+          ? await githubAppInstallationRepositories(env, installation.id)
+          : [];
+      const record: AuthInstallation = {
+        id: installation.id,
+        accountLogin: account,
+        accountType: installationAccount.type === "Organization" ? "org" : "user",
+        accountUrl: installationAccount.html_url,
+        avatarUrl: installationAccount.avatar_url,
+        repositorySelection: installation.repository_selection,
+        repositories,
+      };
+      await writeInstallationRegistry(env, [record]);
+      return record;
+    }
+    if (result.length < 100) break;
+  }
+  await env.DASHBOARD_CACHE.put(installationMissKey(account), new Date().toISOString(), {
+    expirationTtl: 10 * 60,
+  });
+  return null;
 }
 
 async function githubAppInstallationRepositories(
@@ -1282,6 +1457,7 @@ async function acknowledgedInstallations(
     ...(record.session.installations ?? []),
     ...acknowledged,
   ]);
+  await writeInstallationRegistry(env, installations);
   await writeSessionRecord(env, record.id, {
     ...record.session,
     installations,
@@ -1402,8 +1578,24 @@ async function githubInstallationToken(env: Env, installationId: number): Promis
     "installation token",
   );
   if (!response.ok || !result.token) {
+    console.log(
+      JSON.stringify({
+        event: "github_installation_token",
+        installationId,
+        status: response.status,
+        ok: false,
+      }),
+    );
     throw new Error(result.message || `GitHub installation token failed: ${response.status}`);
   }
+  console.log(
+    JSON.stringify({
+      event: "github_installation_token",
+      installationId,
+      status: response.status,
+      ok: true,
+    }),
+  );
   return result.token;
 }
 
@@ -1451,6 +1643,29 @@ async function cachedInstallationToken(env: Env, installationId: number): Promis
   return token;
 }
 
+async function sourceInstallationToken(
+  env: Env,
+  sources: TokenSources,
+): Promise<RequestToken | null> {
+  if (!appTokenConfigured(env)) return null;
+  const accounts = sourceAccounts(sources);
+  if (accounts.length !== 1) return null;
+  const account = accounts[0]!;
+  let installation = await readInstallationRegistry(env, account);
+  if (!installation) {
+    installation = await githubAppInstallationForAccount(env, account).catch(() => null);
+  }
+  if (!installation || !installationCoversSources(installation, sources)) return null;
+  const token = await cachedInstallationToken(env, installation.id);
+  return token
+    ? {
+        token,
+        quotaSource: "app",
+        quotaAccount: installation.accountLogin,
+      }
+    : null;
+}
+
 async function requestInstallationToken(
   request: Request,
   env: Env,
@@ -1470,6 +1685,17 @@ async function requestInstallationToken(
         quotaAccount: installation?.accountLogin ?? null,
       }
     : null;
+}
+
+async function bestInstallationToken(
+  request: Request,
+  env: Env,
+  sources: TokenSources,
+): Promise<RequestToken | null> {
+  return (
+    (await requestInstallationToken(request, env, sources).catch(() => null)) ??
+    (await sourceInstallationToken(env, sources).catch(() => null))
+  );
 }
 
 function sourceAccounts(sources: TokenSources): string[] {
@@ -2204,6 +2430,7 @@ async function detailGitHubJson<TSchema extends GenericSchema>(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<InferOutput<TSchema>> {
   const response = await workerFetch(`https://api.github.com${path}`, {
     headers: {
@@ -2213,7 +2440,9 @@ async function detailGitHubJson<TSchema extends GenericSchema>(
       "x-github-api-version": "2022-11-28",
     },
   });
-  onQuota(quotaFromGitHubResponse(response, quotaSource, quotaAccount));
+  const quota = quotaFromGitHubResponse(response, quotaSource, quotaAccount);
+  onQuota(quota);
+  auditGitHubTokenUse(auditArea, path, response.status, quota);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const message =
@@ -2235,6 +2464,7 @@ async function detailGitHubStats<TSchema extends GenericSchema>(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<{
   state: "ready" | "warming" | "unavailable";
   data: InferOutput<TSchema> | null;
@@ -2248,7 +2478,9 @@ async function detailGitHubStats<TSchema extends GenericSchema>(
       "x-github-api-version": "2022-11-28",
     },
   });
-  onQuota(quotaFromGitHubResponse(response, quotaSource, quotaAccount));
+  const quota = quotaFromGitHubResponse(response, quotaSource, quotaAccount);
+  onQuota(quota);
+  auditGitHubTokenUse(auditArea, path, response.status, quota);
   if (response.status === 202) {
     return {
       state: "warming",
@@ -2287,6 +2519,7 @@ async function detailGitHubCount(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<number> {
   const response = await workerFetch(`https://api.github.com${path}`, {
     headers: {
@@ -2296,7 +2529,9 @@ async function detailGitHubCount(
       "x-github-api-version": "2022-11-28",
     },
   });
-  onQuota(quotaFromGitHubResponse(response, quotaSource, quotaAccount));
+  const quota = quotaFromGitHubResponse(response, quotaSource, quotaAccount);
+  onQuota(quota);
+  auditGitHubTokenUse(auditArea, path, response.status, quota);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const message =
@@ -2319,6 +2554,7 @@ async function detailGitHubSearchCount(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<number> {
   const result = await detailGitHubJson(
     `/search/issues?q=${encodeURIComponent(query)}&per_page=1`,
@@ -2328,6 +2564,7 @@ async function detailGitHubSearchCount(
     quotaSource,
     quotaAccount,
     onQuota,
+    auditArea,
   );
   return result.total_count ?? 0;
 }
@@ -2338,6 +2575,7 @@ async function buildWorkTrend(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<RepoDetailWorkTrend> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const repoQuery = `repo:${fullName}`;
@@ -2349,6 +2587,7 @@ async function buildWorkTrend(
         quotaSource,
         quotaAccount,
         onQuota,
+        auditArea,
       ),
       detailGitHubSearchCount(
         `${repoQuery} is:issue closed:>=${since}`,
@@ -2356,6 +2595,7 @@ async function buildWorkTrend(
         quotaSource,
         quotaAccount,
         onQuota,
+        auditArea,
       ),
       detailGitHubSearchCount(
         `${repoQuery} is:pr created:>=${since}`,
@@ -2363,6 +2603,7 @@ async function buildWorkTrend(
         quotaSource,
         quotaAccount,
         onQuota,
+        auditArea,
       ),
       detailGitHubSearchCount(
         `${repoQuery} is:pr closed:>=${since}`,
@@ -2370,6 +2611,7 @@ async function buildWorkTrend(
         quotaSource,
         quotaAccount,
         onQuota,
+        auditArea,
       ),
     ]);
   return {
@@ -2664,6 +2906,7 @@ async function fetchOwnerActivityEvents(
       quotaSource,
       quotaAccount,
       onQuota,
+      "owner-activity",
     );
     if (pageEvents.length === 0) break;
     const normalized = pageEvents.map(normalizeActivityEvent).filter((event) => event !== null);
@@ -2700,6 +2943,7 @@ async function fetchRepoActivityEvents(
       quotaSource,
       quotaAccount,
       onQuota,
+      "repo-activity",
     );
     if (pageEvents.length === 0) break;
     const normalized = pageEvents.map(normalizeActivityEvent).filter((event) => event !== null);
@@ -2948,7 +3192,7 @@ async function buildOwnerActivity(
   request: Request,
   env: Env,
 ): Promise<OwnerActivityPayload> {
-  const requestToken = await requestInstallationToken(request, env, {
+  const requestToken = await bestInstallationToken(request, env, {
     owners: [ownerSlug],
     repos: [],
   }).catch(() => null);
@@ -2961,7 +3205,7 @@ async function buildOwnerActivity(
   };
   const owner = await resolveOwnerType(ownerSlug, {
     token: token ?? undefined,
-    fetch: workerFetch,
+    fetch: auditGitHubFetch("owner-activity", quotaSource, quotaAccount),
   });
   if (!owner) {
     throw new Error(`owner not found: ${ownerSlug}`);
@@ -3114,7 +3358,7 @@ async function buildRepoActivity(
   env: Env,
 ): Promise<RepoDetailActivityPayload> {
   const fullName = `${slugOwner(owner)}/${repoName.toLowerCase()}`;
-  const requestToken = await requestInstallationToken(request, env, {
+  const requestToken = await bestInstallationToken(request, env, {
     owners: [],
     repos: [fullName],
   }).catch(() => null);
@@ -3709,6 +3953,7 @@ async function compareCommitTitles(
       quotaSource,
       quotaAccount,
       onQuota,
+      "release-summary",
     );
     total = compare.total_commits ?? total;
     const pageTitles = (compare.commits ?? [])
@@ -3756,7 +4001,7 @@ async function summarizeReleaseDelta(
   if (!project.releaseDate || project.version === "unreleased" || !project.latestCommitSha) {
     return unavailableReleaseSummary(project, model, "No comparable release delta is available.");
   }
-  const requestToken = await requestInstallationToken(request, env, {
+  const requestToken = await bestInstallationToken(request, env, {
     owners: [],
     repos: [project.fullName],
   }).catch(() => null);
@@ -3840,7 +4085,7 @@ async function buildRepoDetail(
   env: Env,
 ): Promise<RepoDetailPayload> {
   const fullName = `${slugOwner(owner)}/${repoName.toLowerCase()}`;
-  const requestToken = await requestInstallationToken(request, env, {
+  const requestToken = await bestInstallationToken(request, env, {
     owners: [],
     repos: [fullName],
   }).catch(() => null);
@@ -4382,6 +4627,12 @@ async function discoverPayload(
       "x-github-api-version": "2022-11-28",
     },
   });
+  auditGitHubTokenUse(
+    "discover",
+    `${search.pathname}${search.search}`,
+    response.status,
+    quotaFromResponse(response, env),
+  );
   const body = parseGitHubResponse(
     gitHubSearchRepositoryListSchema,
     await response.json(),
@@ -4471,7 +4722,7 @@ async function hydrateDiscoverPayload(
     includeUnreleased: true,
     token: env.GITHUB_TOKEN,
     quotaSource: env.GITHUB_TOKEN ? "shared" : "anonymous",
-    fetch: workerFetch,
+    fetch: auditGitHubFetch("discover", env.GITHUB_TOKEN ? "shared" : "anonymous", null),
     projectCache: env.DASHBOARD_CACHE,
   });
   const hydratedProjects = new Map(
@@ -4781,7 +5032,11 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       quotaSource:
         dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
       quotaAccount: dashboard.quotaAccount ?? null,
-      fetch: workerFetch,
+      fetch: auditGitHubFetch(
+        "dashboard",
+        dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
+        dashboard.quotaAccount ?? null,
+      ),
       projectCache: env.DASHBOARD_CACHE,
       onProgress: (partial, progress) => saveProgress(partial, progress.scannedRepo),
     });
@@ -5053,7 +5308,7 @@ async function ownerResponse(
   const ageMs = cacheAgeMs(cached);
   const displayCached = canDisplayCached(cached);
   const tokenSources = { owners: ownerSlugs, repos: includeRepos };
-  const requestToken = () => requestInstallationToken(request, env, tokenSources);
+  const requestToken = () => bestInstallationToken(request, env, tokenSources);
 
   if (displayCached && cached.cache?.state === "error") {
     context.waitUntil(
@@ -5093,7 +5348,13 @@ async function ownerResponse(
   const token = await requestToken().catch(() => null);
   let owners: Owner[] | null;
   try {
-    owners = await resolveOwners(ownerSlugs, env, token?.token);
+    owners = await resolveOwners(
+      ownerSlugs,
+      env,
+      token?.token,
+      token?.quotaSource,
+      token?.quotaAccount ?? null,
+    );
   } catch (error) {
     const dashboard = unresolvedDashboardRequest(
       ownerSlugs,

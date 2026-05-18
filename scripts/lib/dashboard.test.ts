@@ -3830,6 +3830,181 @@ test("worker uses GitHub App installation token for cold owner dashboards", asyn
   }
 });
 
+test("worker uses registered source-owned app tokens for anonymous owner dashboards", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const cache = kvStore({
+    "auth:installation:v1:openclaw": JSON.stringify({
+      id: 1,
+      accountLogin: "openclaw",
+      accountType: "org",
+      accountUrl: "https://github.com/openclaw",
+      avatarUrl: "https://avatars.githubusercontent.com/u/2",
+      repositorySelection: "all",
+      repositories: [],
+      updatedAt: "2026-05-15T12:00:00Z",
+    }),
+  });
+  const env = {
+    DASHBOARD_CACHE: cache,
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+    GITHUB_TOKEN: "shared-token",
+  };
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const auditLogs: unknown[] = [];
+  let ownerResolvedWithInstallationToken = false;
+  console.log = (message?: unknown) => {
+    if (typeof message === "string" && message.includes("github_token_use")) {
+      auditLogs.push(JSON.parse(message));
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/app/installations/1/access_tokens") {
+      assert.match(authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      return Response.json({ token: "installation-token" });
+    }
+    if (url.pathname === "/users/openclaw") {
+      assert.equal(authorization, "Bearer installation-token");
+      ownerResolvedWithInstallationToken = true;
+      return Response.json({ login: "openclaw", type: "Organization" });
+    }
+    if (url.pathname === "/graphql") {
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json(
+        {
+          data: {
+            repositoryOwner: {
+              __typename: "Organization",
+              repositories: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+        {
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4998",
+            "x-ratelimit-reset": String(Math.floor(Date.parse("2026-05-15T13:00:00Z") / 1000)),
+            "x-ratelimit-resource": "graphql",
+          },
+        },
+      );
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(new Request("https://release.bar/api/openclaw"), env, {
+      waitUntil: () => undefined,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(ownerResolvedWithInstallationToken, true);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.quota?.source, "app");
+    assert.equal(body.cache?.quota?.account, "openclaw");
+    assert.equal(body.cache?.quota?.remaining, 4998);
+    assert.equal(
+      auditLogs.some(
+        (entry) =>
+          (entry as { event?: string; quota?: { source?: string; account?: string } }).event ===
+            "github_token_use" &&
+          (entry as { quota?: { source?: string; account?: string } }).quota?.source === "app" &&
+          (entry as { quota?: { source?: string; account?: string } }).quota?.account ===
+            "openclaw",
+      ),
+      true,
+    );
+  } finally {
+    console.log = originalLog;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker discovers and stores source-owned app installs for anonymous dashboards", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const cache = kvStore();
+  const env = {
+    DASHBOARD_CACHE: cache,
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+    GITHUB_TOKEN: "shared-token",
+  };
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  console.log = () => undefined;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/app/installations") {
+      assert.match(authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      return Response.json([
+        {
+          id: 7,
+          account: {
+            login: "openclaw",
+            type: "Organization",
+            avatar_url: "https://avatars.githubusercontent.com/u/2",
+            html_url: "https://github.com/openclaw",
+          },
+          html_url: "https://github.com/organizations/openclaw/settings/installations/7",
+          repository_selection: "all",
+          target_type: "Organization",
+        },
+      ]);
+    }
+    if (url.pathname === "/app/installations/7/access_tokens") {
+      assert.match(authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      return Response.json({ token: "installation-token" });
+    }
+    if (url.pathname === "/users/openclaw") {
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json({ login: "openclaw", type: "Organization" });
+    }
+    if (url.pathname === "/graphql") {
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json({
+        data: {
+          repositoryOwner: {
+            __typename: "Organization",
+            repositories: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [],
+            },
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(new Request("https://release.bar/api/openclaw"), env, {
+      waitUntil: () => undefined,
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.quota?.source, "app");
+    assert.equal(body.cache?.quota?.account, "openclaw");
+    const stored = JSON.parse((await cache.get("auth:installation:v1:openclaw")) ?? "{}");
+    assert.equal(stored.id, 7);
+    assert.equal(stored.repositorySelection, "all");
+  } finally {
+    console.log = originalLog;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("worker saves owner public defaults and applies them to clean owner URLs", async () => {
   const sessionId = "session-profile";
   const exp = Math.floor(Date.now() / 1000) + 600;

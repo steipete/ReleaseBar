@@ -16,6 +16,7 @@ export type DashboardBuildOptions = {
   includeForks: boolean;
   includeArchived: boolean;
   includeUnreleased?: boolean;
+  includeReleaseData?: boolean;
   excludeRepos?: string[];
   includeRepos?: string[];
   initialProjects?: Project[];
@@ -155,7 +156,7 @@ type GraphQLRepoNode = {
   isPrivate: boolean;
   pushedAt: string | null;
   updatedAt: string | null;
-  releases: {
+  releases?: {
     nodes: Array<{
       tagName: string;
       name: string | null;
@@ -163,7 +164,7 @@ type GraphQLRepoNode = {
       isDraft?: boolean;
       publishedAt: string | null;
     } | null>;
-  };
+  } | null;
 };
 
 type GraphQLRepoPage = {
@@ -294,6 +295,7 @@ export function dashboardCacheKey(options: {
   includeForks?: boolean;
   includeArchived?: boolean;
   includeUnreleased?: boolean;
+  includeReleaseData?: boolean;
   schemaVersion?: number;
 }): string {
   const schemaVersion = options.schemaVersion ?? 1;
@@ -301,6 +303,7 @@ export function dashboardCacheKey(options: {
     options.includeForks ? "forks" : "noforks",
     options.includeArchived ? "archived" : "noarchived",
     options.includeUnreleased ? "unreleased" : "released",
+    options.includeReleaseData === false ? "metadata" : "release",
   ].join("-");
   const owners = (options.owners ?? []).map(slugOwner).sort().join(",");
   const repos = (options.repos ?? [])
@@ -504,7 +507,12 @@ async function githubGraphql<T>(
 }
 
 const ownerReposQuery = /* GraphQL */ `
-  query ReleaseBarOwnerRepos($login: String!, $first: Int!, $after: String) {
+  query ReleaseBarOwnerRepos(
+    $login: String!
+    $first: Int!
+    $after: String
+    $includeReleases: Boolean!
+  ) {
     repositoryOwner(login: $login) {
       __typename
       repositories(
@@ -553,7 +561,8 @@ const ownerReposQuery = /* GraphQL */ `
           isPrivate
           pushedAt
           updatedAt
-          releases(first: 10, orderBy: { field: CREATED_AT, direction: DESC }) {
+          releases(first: 10, orderBy: { field: CREATED_AT, direction: DESC })
+            @include(if: $includeReleases) {
             nodes {
               tagName
               name
@@ -569,7 +578,7 @@ const ownerReposQuery = /* GraphQL */ `
 `;
 
 function graphQlRepo(node: GraphQLRepoNode): GitHubRepo {
-  const latestRelease = node.releases.nodes.find(
+  const latestRelease = node.releases?.nodes.find(
     (release) => release?.tagName && !release.isDraft && release.publishedAt,
   );
   return {
@@ -613,6 +622,7 @@ async function ownerReposGraphqlPage(
   client: GitHubClient,
   owner: Owner,
   page: number,
+  includeReleaseData: boolean,
 ): Promise<GitHubRepo[] | null> {
   const cursorKey = `${owner.type}:${slugOwner(owner.login)}`;
   const cursors = client.graphqlCursors.get(cursorKey) ?? [null];
@@ -624,6 +634,7 @@ async function ownerReposGraphqlPage(
     login: owner.login,
     first: 100,
     after,
+    includeReleases: includeReleaseData,
   });
   const repositoryOwner = body?.data?.repositoryOwner;
   if (!repositoryOwner) {
@@ -668,10 +679,11 @@ async function githubCount(client: GitHubClient, pathname: string): Promise<numb
 async function ownerRepos(
   client: GitHubClient,
   owner: Owner,
+  includeReleaseData: boolean,
   page?: number,
 ): Promise<GitHubRepo[]> {
   if (page) {
-    const graphqlRepos = await ownerReposGraphqlPage(client, owner, page);
+    const graphqlRepos = await ownerReposGraphqlPage(client, owner, page, includeReleaseData);
     if (graphqlRepos) {
       return graphqlRepos;
     }
@@ -832,8 +844,12 @@ async function repoSummary(
   };
 }
 
-function projectCacheKey(repo: GitHubRepo, includeUnreleased: boolean): string {
-  return `repo:v1:${repo.full_name.toLowerCase()}:${includeUnreleased ? "unreleased" : "released"}`;
+function projectCacheKey(
+  repo: GitHubRepo,
+  includeUnreleased: boolean,
+  includeReleaseData: boolean,
+): string {
+  return `repo:v1:${repo.full_name.toLowerCase()}:${includeUnreleased ? "unreleased" : "released"}:${includeReleaseData ? "release" : "metadata"}`;
 }
 
 function projectCacheSignature(repo: GitHubRepo): string {
@@ -851,8 +867,9 @@ async function readProjectCache(
   cache: ProjectCache | undefined,
   repo: GitHubRepo,
   includeUnreleased: boolean,
+  includeReleaseData: boolean,
 ): Promise<Omit<Project, "freshness"> | null> {
-  const raw = await cache?.get(projectCacheKey(repo, includeUnreleased));
+  const raw = await cache?.get(projectCacheKey(repo, includeUnreleased, includeReleaseData));
   if (!raw) return null;
   try {
     const cached = JSON.parse(raw) as ProjectCacheEntry;
@@ -866,10 +883,11 @@ async function writeProjectCache(
   cache: ProjectCache | undefined,
   repo: GitHubRepo,
   includeUnreleased: boolean,
+  includeReleaseData: boolean,
   project: Omit<Project, "freshness">,
 ): Promise<void> {
   await cache?.put(
-    projectCacheKey(repo, includeUnreleased),
+    projectCacheKey(repo, includeUnreleased, includeReleaseData),
     JSON.stringify({
       signature: projectCacheSignature(repo),
       project,
@@ -900,6 +918,7 @@ export async function resolveOwnerType(
 }
 
 export async function buildDashboard(options: DashboardBuildOptions): Promise<DashboardPayload> {
+  const includeReleaseData = options.includeReleaseData ?? true;
   const client = githubClient(
     options.token,
     options.fetch,
@@ -952,15 +971,19 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
         generatedAt,
         quota: client.quota,
         ...(progress ? { progress } : {}),
-        ...(progress && !progress.done
+        ...(!includeReleaseData
           ? {
-              message: `scanned ${progress.scanned}${progress.limit ? `/${progress.limit}` : ""} recently pushed repos; still updating`,
+              message: "release scan skipped until this account is synced with GitHub App quota",
             }
-          : capped && options.repoScanLimit
+          : progress && !progress.done
             ? {
-                message: `scanned ${options.repoScanLimit} recently pushed repos per owner`,
+                message: `scanned ${progress.scanned}${progress.limit ? `/${progress.limit}` : ""} recently pushed repos; still updating`,
               }
-            : {}),
+            : capped && options.repoScanLimit
+              ? {
+                  message: `scanned ${options.repoScanLimit} recently pushed repos per owner`,
+                }
+              : {}),
       },
       totals: {
         repos: sortedProjects.length,
@@ -973,6 +996,11 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       },
       projects: sortedProjects,
     };
+  }
+
+  if (!includeReleaseData && !options.includeUnreleased) {
+    projects.splice(0, projects.length);
+    return payload("fresh");
   }
 
   async function addRepo(repo: GitHubRepo, countLabel: string, force = false): Promise<boolean> {
@@ -991,8 +1019,19 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
     seen.add(repo.full_name.toLowerCase());
     options.log?.(`fetch ${countLabel} ${repo.full_name}`);
     const includeUnreleased = Boolean(options.includeUnreleased);
-    const cached = await readProjectCache(options.projectCache, repo, includeUnreleased);
-    const project = cached ?? (await repoSummary(client, repo, includeUnreleased));
+    const cached = await readProjectCache(
+      options.projectCache,
+      repo,
+      includeUnreleased,
+      includeReleaseData,
+    );
+    const project =
+      cached ??
+      (includeReleaseData
+        ? await repoSummary(client, repo, includeUnreleased)
+        : includeUnreleased
+          ? repoSearchProject(repo)
+          : null);
     if (!project) {
       if (existingIndex >= 0) {
         projects.splice(existingIndex, 1);
@@ -1001,7 +1040,13 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       return false;
     }
     if (!cached) {
-      await writeProjectCache(options.projectCache, repo, includeUnreleased, project);
+      await writeProjectCache(
+        options.projectCache,
+        repo,
+        includeUnreleased,
+        includeReleaseData,
+        project,
+      );
     }
     const hydrated = { ...project, freshness: freshness(project) };
     if (existingIndex >= 0) {
@@ -1020,9 +1065,11 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       let ownerVisible = ownerExisting;
       let hydratedThisOwner = 0;
       let page = 1;
-      const scanLimit = options.repoScanLimit ?? Number.POSITIVE_INFINITY;
+      const scanLimit = includeReleaseData
+        ? (options.repoScanLimit ?? Number.POSITIVE_INFINITY)
+        : Number.POSITIVE_INFINITY;
       while (ownerVisible < options.repoLimit || hydratedThisOwner < scanLimit) {
-        const repos = await ownerRepos(client, owner, page);
+        const repos = await ownerRepos(client, owner, includeReleaseData, page);
         if (repos.length === 0) {
           break;
         }
@@ -1104,7 +1151,7 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
   } else {
     const repos: GitHubRepo[] = [];
     for (const owner of options.owners) {
-      repos.push(...(await ownerRepos(client, owner)));
+      repos.push(...(await ownerRepos(client, owner, includeReleaseData)));
     }
 
     const uniqueRepos = [

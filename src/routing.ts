@@ -28,6 +28,7 @@ export type RouteOptions = {
 
 export const workerApiOrigin = "";
 export const workersDevApiOrigin = "https://releasedeck-api.steipete.workers.dev";
+const localWorkerApiPort = "8787";
 const ownerListKey = "owners";
 const repoListKey = "repos";
 const discoverLanguageKey = "hotLang";
@@ -39,6 +40,27 @@ const discoverPeriodValues = new Set<DiscoverPeriod>([
   "year",
   "releasebar",
 ]);
+
+type RouteLocation = {
+  protocol: string;
+  hostname: string;
+  port: string;
+};
+
+function currentRouteLocation(): RouteLocation | null {
+  return (globalThis as { location?: RouteLocation }).location ?? null;
+}
+
+export function fallbackApiOrigin(currentLocation = currentRouteLocation()): string {
+  if (
+    currentLocation &&
+    (currentLocation.hostname === "127.0.0.1" || currentLocation.hostname === "localhost") &&
+    currentLocation.port !== localWorkerApiPort
+  ) {
+    return `${currentLocation.protocol}//${currentLocation.hostname}:${localWorkerApiPort}`;
+  }
+  return workersDevApiOrigin;
+}
 
 export function ownerFromPath(pathname: string): string | null {
   const [first] = pathname.split("/").filter(Boolean);
@@ -96,7 +118,7 @@ export function repoFromPath(pathname: string, apiOrigin = workerApiOrigin): Rep
     repo,
     fullName,
     apiPath: `${apiOrigin}${apiPath}`,
-    fallbackApiPath: apiOrigin === "" ? `${workersDevApiOrigin}${apiPath}` : null,
+    fallbackApiPath: apiOrigin === "" ? `${fallbackApiOrigin()}${apiPath}` : null,
   };
 }
 
@@ -159,7 +181,7 @@ export function dashboardRoute(
     return {
       owner: null,
       apiPath: `${apiOrigin}${apiPath}`,
-      fallbackApiPath: apiOrigin === "" ? `${workersDevApiOrigin}${apiPath}` : null,
+      fallbackApiPath: apiOrigin === "" ? `${fallbackApiOrigin()}${apiPath}` : null,
       label: custom ? "custom deck" : "GitHub Hot",
       isDefault: !custom,
       extraOwners,
@@ -173,7 +195,7 @@ export function dashboardRoute(
   return {
     owner,
     apiPath: `${apiOrigin}${ownerPath}`,
-    fallbackApiPath: apiOrigin === "" ? `${workersDevApiOrigin}${ownerPath}` : null,
+    fallbackApiPath: apiOrigin === "" ? `${fallbackApiOrigin()}${ownerPath}` : null,
     label:
       extraOwners.length > 0 || repos.length > 0
         ? `@${owner} +${extraOwners.length + repos.length}`

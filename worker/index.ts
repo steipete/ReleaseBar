@@ -1,4 +1,10 @@
 import {
+  calculateAudienceScore,
+  type AudienceOrgSignal,
+  type AudienceRepoSignal,
+  type AudienceScoreTier,
+} from "../scripts/lib/audience.js";
+import {
   buildDashboard,
   dashboardCacheKey,
   GitHubRateLimitError,
@@ -28,6 +34,10 @@ import {
   gitHubRepositorySchema,
   gitHubSearchRepositoryListSchema,
   gitHubSearchCountSchema,
+  gitHubStargazerListSchema,
+  gitHubUserOrganizationListSchema,
+  gitHubUserProfileSchema,
+  gitHubUserRepositoryListSchema,
   hotIndexSchema,
   parseGitHubResponse,
   safeJsonParse,
@@ -36,9 +46,14 @@ import {
   type GitHubInstallationRepository,
   type GitHubPublicEvent,
   type GitHubSearchRepository,
+  type GitHubStargazer,
+  type GitHubUserOrganization,
+  type GitHubUserProfile,
+  type GitHubUserRepository,
 } from "./schemas.js";
 import type {
   ApiQuota,
+  AudienceRange,
   AuthInstallation,
   AuthPayload,
   AuthUser,
@@ -51,10 +66,14 @@ import type {
   OwnerActivityRepository,
   OwnerActivitySummary,
   Project,
+  RepoAudiencePayload,
+  RepoAudienceUser,
   RepoDetailActivityPayload,
   RepoDetailPayload,
   RepoDetailReleaseSummary,
   RepoDetailWorkTrend,
+  AudienceScoreFactor,
+  TrustProfilePayload,
 } from "../src/types.js";
 
 type KVNamespace = {
@@ -107,6 +126,11 @@ type ExecutionContext = {
   waitUntil(promise: Promise<unknown>): void;
 };
 
+type UserTrustSignal = {
+  score: number;
+  tier: AudienceScoreTier;
+};
+
 const fullTtlMs = 60 * 60 * 1000;
 const dashboardStorageTtlSeconds = 90 * 24 * 60 * 60;
 const progressTtlSeconds = 7 * 24 * 60 * 60;
@@ -131,6 +155,12 @@ const discoverHydrateBatchSize = 12;
 const discoverCacheTtlMs = 60 * 60 * 1000;
 const repoDetailCacheTtlMs = 6 * 60 * 60 * 1000;
 const repoDetailWarmingRefreshMs = 30 * 1000;
+const repoAudienceCacheTtlMs = 6 * 60 * 60 * 1000;
+const repoAudienceUserTtlSeconds = 7 * 24 * 60 * 60;
+const repoAudienceStargazerLimit = 30;
+const repoAudienceDeepUserLimit = 12;
+const repoAudienceRanges: AudienceRange[] = ["week", "month"];
+const repoAudienceUserRepoLimit = 8;
 const releaseSummaryPromptVersion = 1;
 const releaseSummaryCommitLimit = 500;
 const activitySummaryPromptVersion = 2;
@@ -165,6 +195,24 @@ function isRepoDetailApiPath(pathname: string): boolean {
   return parts.length === 4 && parts[0] === "api" && parts[1] === "repos";
 }
 
+function isRepoAudienceApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return (
+    parts.length === 5 && parts[0] === "api" && parts[1] === "repos" && parts[4] === "audience"
+  );
+}
+
+function isRepoAudienceBackfillApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return (
+    parts.length === 6 &&
+    parts[0] === "api" &&
+    parts[1] === "repos" &&
+    parts[4] === "audience" &&
+    parts[5] === "backfill"
+  );
+}
+
 function isRepoActivityApiPath(pathname: string): boolean {
   const parts = pathname.split("/").filter(Boolean);
   return (
@@ -177,6 +225,21 @@ function isOwnerActivityApiPath(pathname: string): boolean {
   return parts.length === 3 && parts[0] === "api" && parts[2] === "activity";
 }
 
+function isOwnerEventsApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts.length === 3 && parts[0] === "api" && parts[2] === "events";
+}
+
+function isOwnerApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts.length === 2 && parts[0] === "api";
+}
+
+function isTrustProfileApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts.length === 4 && parts[0] === "api" && parts[1] === "users" && parts[3] === "trust";
+}
+
 type DashboardRequest = {
   owners: Owner[];
   includeRepos: string[];
@@ -184,6 +247,7 @@ type DashboardRequest = {
   subtitle: string;
   key: string;
   url: URL;
+  includeReleaseData: boolean;
   token?: string;
   quotaSource?: ApiQuota["source"];
   quotaAccount?: string | null;
@@ -200,10 +264,38 @@ type GitHubAuditArea =
   | "discover"
   | "owner-activity"
   | "repo-activity"
+  | "repo-audience"
   | "repo-detail"
   | "release-summary"
+  | "trust-profile"
   | "social-card"
   | "auth";
+
+const githubAuditAreas = new Set<GitHubAuditArea>([
+  "dashboard",
+  "discover",
+  "owner-activity",
+  "repo-activity",
+  "repo-audience",
+  "repo-detail",
+  "release-summary",
+  "trust-profile",
+  "social-card",
+  "auth",
+]);
+
+function githubRequestOptions(
+  acceptOrAuditArea = "application/vnd.github+json",
+  auditArea: GitHubAuditArea = "repo-detail",
+): { accept: string; auditArea: GitHubAuditArea } {
+  if (githubAuditAreas.has(acceptOrAuditArea as GitHubAuditArea)) {
+    return {
+      accept: "application/vnd.github+json",
+      auditArea: acceptOrAuditArea as GitHubAuditArea,
+    };
+  }
+  return { accept: acceptOrAuditArea, auditArea };
+}
 
 type ProfileInput = {
   includeOwners?: unknown;
@@ -645,7 +737,11 @@ async function resolveOwners(
   return owners;
 }
 
-async function initialPageData(url: URL, env: Env): Promise<InitialPageData | null> {
+async function initialPageData(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<InitialPageData | null> {
   const repo = repoFullNameFromPath(url.pathname);
   if (repo) return cachedRepoInitialData(env, repo);
 
@@ -653,7 +749,7 @@ async function initialPageData(url: URL, env: Env): Promise<InitialPageData | nu
   const custom =
     ownerListFromUrl(url, primaryOwner ?? undefined).length > 0 || repoListFromUrl(url).length > 0;
   if (primaryOwner || custom) {
-    return cachedDashboardInitialData(env, url, primaryOwner);
+    return cachedDashboardInitialData(request, env, url, primaryOwner);
   }
   if ((url.searchParams.get("period") ?? "").toLowerCase() === "releasebar") {
     return cachedHotInitialData(env);
@@ -676,7 +772,7 @@ async function assetResponse(request: Request, env: Env): Promise<Response> {
     const originalUrl = new URL(request.url);
     const label = socialLabel(originalUrl);
     const image = `${originalUrl.origin}/og/${encodeURIComponent(label)}.svg`;
-    const initialData = await initialPageData(originalUrl, env).catch(() => null);
+    const initialData = await initialPageData(request, originalUrl, env).catch(() => null);
     const html = injectInitialPageData(
       (await response.text())
         .replace(/<title>.*?<\/title>/, `<title>${escapeHtml(label)} · release.bar</title>`)
@@ -707,7 +803,9 @@ async function assetResponse(request: Request, env: Env): Promise<Response> {
     headers.delete("content-length");
     headers.delete("etag");
     headers.set("content-type", "text/html; charset=utf-8");
-    headers.set("cache-control", "public, max-age=300");
+    for (const [name, value] of Object.entries(authDependentAppShellHeaders(request, env))) {
+      headers.set(name, value);
+    }
     return new Response(html, {
       status: response.status,
       headers,
@@ -980,6 +1078,235 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
       ...headers,
     },
   });
+}
+
+function openApiSpec(origin: string): Record<string, unknown> {
+  const cacheState = {
+    type: "object",
+    required: ["state", "stale", "generatedAt"],
+    properties: {
+      state: { enum: ["fresh", "stale", "partial", "warming", "error"] },
+      stale: { type: "boolean" },
+      generatedAt: { type: "string", format: "date-time" },
+      message: { type: "string" },
+      quota: {
+        type: "object",
+        properties: {
+          source: { enum: ["app", "shared", "anonymous"] },
+          account: { type: ["string", "null"] },
+          remaining: { type: ["number", "null"] },
+          limit: { type: ["number", "null"] },
+          resetAt: { type: ["string", "null"], format: "date-time" },
+          resource: { type: ["string", "null"] },
+        },
+      },
+    },
+  };
+  const trustFactor = {
+    type: "object",
+    required: [
+      "key",
+      "label",
+      "value",
+      "maxValue",
+      "weight",
+      "weightedValue",
+      "detail",
+      "sentiment",
+    ],
+    properties: {
+      key: { enum: ["age", "profile", "orgs", "reach", "builder", "recency", "risk"] },
+      label: { type: "string" },
+      value: { type: "number" },
+      maxValue: { type: "number" },
+      weight: { type: "number" },
+      weightedValue: { type: "number" },
+      detail: { type: "string" },
+      sentiment: { enum: ["positive", "neutral", "negative"] },
+    },
+  };
+  const trustDimensions = {
+    type: "object",
+    required: ["trust", "influence", "builder", "recency", "risk"],
+    properties: {
+      trust: { type: "number", minimum: 0, maximum: 100 },
+      influence: { type: "number", minimum: 0, maximum: 100 },
+      builder: { type: "number", minimum: 0, maximum: 100 },
+      recency: { type: "number", minimum: 0, maximum: 100 },
+      risk: {
+        type: "number",
+        minimum: 0,
+        maximum: 100,
+        description: "Account safety score. 100 means no obvious public-account risk signals.",
+      },
+    },
+  };
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "ReleaseBar Public API",
+      version: "0.1.0",
+      description:
+        "Cached public GitHub release, people trust, org signal, and stargazer audience context for dashboards and PR-triage agents.",
+    },
+    servers: [{ url: origin }],
+    paths: {
+      "/api/users/{login}/trust": {
+        get: {
+          summary: "Get cached public people trust or org signal context for one GitHub profile",
+          parameters: [{ name: "login", in: "path", required: true, schema: { type: "string" } }],
+          responses: {
+            "200": {
+              description: "People trust or org signal profile",
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/TrustProfile" } },
+              },
+            },
+          },
+        },
+      },
+      "/api/repos/{owner}/{repo}/audience": {
+        get: {
+          summary: "Get cached recent stargazer audience percentages and scored users",
+          parameters: [
+            { name: "owner", in: "path", required: true, schema: { type: "string" } },
+            { name: "repo", in: "path", required: true, schema: { type: "string" } },
+            { name: "range", in: "query", schema: { enum: ["week", "month"], default: "month" } },
+          ],
+          responses: {
+            "200": {
+              description: "Repository audience",
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/RepoAudience" } },
+              },
+            },
+            "403": { description: "GitHub App quota required for cold audience builds" },
+          },
+        },
+      },
+      "/api/repos/{owner}/{repo}/audience/backfill": {
+        post: {
+          summary: "Warm week and month audience caches with GitHub App quota",
+          parameters: [
+            { name: "owner", in: "path", required: true, schema: { type: "string" } },
+            { name: "repo", in: "path", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            "200": {
+              description: "Backfill state",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/RepoAudienceBackfill" },
+                },
+              },
+            },
+            "403": { description: "GitHub App quota required" },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: {
+        CacheState: cacheState,
+        TrustDimensions: trustDimensions,
+        TrustFactor: trustFactor,
+        TrustProfile: {
+          type: "object",
+          required: [
+            "login",
+            "type",
+            "profileKind",
+            "scoreLabel",
+            "score",
+            "tier",
+            "dimensions",
+            "factors",
+            "cache",
+          ],
+          properties: {
+            login: { type: "string" },
+            type: { enum: ["user", "org"] },
+            profileKind: { enum: ["user_trust", "org_signal"] },
+            scoreLabel: { enum: ["trust score", "org signal"] },
+            score: { type: "number", minimum: 0, maximum: 100 },
+            tier: { enum: ["high", "medium", "low", "bot"] },
+            accountAgeDays: { type: ["number", "null"] },
+            reasons: { type: "array", items: { type: "string" } },
+            dimensions: { $ref: "#/components/schemas/TrustDimensions" },
+            factors: { type: "array", items: { $ref: "#/components/schemas/TrustFactor" } },
+            cache: { $ref: "#/components/schemas/CacheState" },
+          },
+        },
+        RepoAudience: {
+          type: "object",
+          required: ["fullName", "range", "totals", "users", "cache"],
+          properties: {
+            fullName: { type: "string" },
+            range: { enum: ["week", "month"] },
+            totals: {
+              type: "object",
+              required: [
+                "stargazers",
+                "stargazersSampled",
+                "highSignalPercent",
+                "mediumSignalPercent",
+                "lowSignalPercent",
+                "botPercent",
+              ],
+              properties: {
+                stargazers: { type: "number" },
+                stargazersSampled: { type: "number" },
+                highSignal: { type: "number" },
+                mediumSignal: { type: "number" },
+                lowSignal: { type: "number" },
+                bots: { type: "number" },
+                highSignalPercent: { type: "number", minimum: 0, maximum: 100 },
+                mediumSignalPercent: { type: "number", minimum: 0, maximum: 100 },
+                lowSignalPercent: { type: "number", minimum: 0, maximum: 100 },
+                botPercent: { type: "number", minimum: 0, maximum: 100 },
+              },
+            },
+            users: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  login: { type: "string" },
+                  score: { type: "number" },
+                  tier: { enum: ["high", "medium", "low", "bot"] },
+                  trustScore: { type: "number" },
+                  trustTier: { enum: ["high", "medium", "low", "bot"] },
+                  dimensions: { $ref: "#/components/schemas/TrustDimensions" },
+                },
+              },
+            },
+            cache: { $ref: "#/components/schemas/CacheState" },
+          },
+        },
+        RepoAudienceBackfill: {
+          type: "object",
+          required: ["fullName", "ranges", "quota", "message"],
+          properties: {
+            fullName: { type: "string" },
+            ranges: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  range: { enum: ["week", "month"] },
+                  state: { enum: ["busy", "fresh", "rebuilt"] },
+                  users: { type: "number" },
+                  generatedAt: { type: "string", format: "date-time" },
+                },
+              },
+            },
+            quota: { type: "object" },
+            message: { type: "string" },
+          },
+        },
+      },
+    },
+  };
 }
 
 function redirectResponse(
@@ -1515,6 +1842,27 @@ async function acknowledgedInstallations(
 
 function appTokenConfigured(env: Env): boolean {
   return Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY);
+}
+
+async function dashboardReleaseDataAllowed(
+  request: Request,
+  env: Env,
+  sources: TokenSources,
+  token: RequestToken | null | undefined,
+): Promise<boolean> {
+  if (!appTokenConfigured(env) || token?.quotaSource === "app") return true;
+  if (sourceAccounts(sources).length <= 1) return false;
+  return Boolean(await currentSession(request, env));
+}
+
+function authDependentDashboardHeaders(env: Env): Record<string, string> {
+  return appTokenConfigured(env) ? { "cache-control": "private, no-store", vary: "cookie" } : {};
+}
+
+function authDependentAppShellHeaders(request: Request, env: Env): Record<string, string> {
+  return appTokenConfigured(env) && parseCookies(request).has(sessionCookie)
+    ? { "cache-control": "private, no-store", vary: "cookie" }
+    : { "cache-control": "public, max-age=300" };
 }
 
 function normalizePrivateKey(value: string): string {
@@ -2203,6 +2551,7 @@ async function partialDashboardPayload(
       dashboardCacheKey({
         owner,
         ...options,
+        includeReleaseData: dashboard.includeReleaseData,
         schemaVersion: dashboardSchemaVersion,
       }),
     ),
@@ -2211,6 +2560,7 @@ async function partialDashboardPayload(
         owner: "custom",
         repos: [repo],
         ...options,
+        includeReleaseData: dashboard.includeReleaseData,
         schemaVersion: dashboardSchemaVersion,
       }),
     ),
@@ -2311,11 +2661,16 @@ async function rememberHotDashboard(
   payload: DashboardPayload,
 ): Promise<void> {
   if (payload.options?.includeForks) return;
+  if (!payload.projects.some(canContributeToHotDashboard)) return;
   const keys = await readHotIndex(env);
   const next = [key, ...keys.filter((existing) => existing !== key)].slice(0, hotIndexLimit);
   await env.DASHBOARD_CACHE?.put(hotIndexKey, JSON.stringify(next), {
     expirationTtl: dashboardStorageTtlSeconds,
   });
+}
+
+function canContributeToHotDashboard(project: Project): boolean {
+  return !project.archived && Boolean(project.releaseDate) && project.commitsSinceRelease !== null;
 }
 
 function hotDashboardPayload(
@@ -2326,7 +2681,7 @@ function hotDashboardPayload(
   const candidates = new Map<string, Project>();
   for (const dashboard of dashboards) {
     for (const project of dashboard.projects) {
-      if (project.archived || !project.releaseDate || project.commitsSinceRelease === null) {
+      if (!canContributeToHotDashboard(project)) {
         continue;
       }
       const existing = candidates.get(project.fullName.toLowerCase());
@@ -2491,11 +2846,38 @@ async function detailGitHubJson<TSchema extends GenericSchema>(
   quotaSource: ApiQuota["source"],
   quotaAccount: string | null,
   onQuota: (quota: ApiQuota) => void,
+  acceptOrAuditArea = "application/vnd.github+json",
   auditArea: GitHubAuditArea = "repo-detail",
 ): Promise<InferOutput<TSchema>> {
+  const { data } = await detailGitHubJsonWithHeaders(
+    path,
+    schema,
+    context,
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    acceptOrAuditArea,
+    auditArea,
+  );
+  return data;
+}
+
+async function detailGitHubJsonWithHeaders<TSchema extends GenericSchema>(
+  path: string,
+  schema: TSchema,
+  context: string,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+  acceptOrAuditArea = "application/vnd.github+json",
+  auditArea: GitHubAuditArea = "repo-detail",
+): Promise<{ data: InferOutput<TSchema>; headers: Headers }> {
+  const requestOptions = githubRequestOptions(acceptOrAuditArea, auditArea);
   const response = await workerFetch(`https://api.github.com${path}`, {
     headers: {
-      accept: "application/vnd.github+json",
+      accept: requestOptions.accept,
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       "user-agent": "ReleaseBar",
       "x-github-api-version": "2022-11-28",
@@ -2503,7 +2885,7 @@ async function detailGitHubJson<TSchema extends GenericSchema>(
   });
   const quota = quotaFromGitHubResponse(response, quotaSource, quotaAccount);
   onQuota(quota);
-  auditGitHubTokenUse(auditArea, path, response.status, quota);
+  auditGitHubTokenUse(requestOptions.auditArea, path, response.status, quota);
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const message =
@@ -2515,7 +2897,7 @@ async function detailGitHubJson<TSchema extends GenericSchema>(
     }
     throw new Error(`GitHub API ${response.status} for ${path}: ${message}`);
   }
-  return parseGitHubResponse(schema, body, context);
+  return { data: parseGitHubResponse(schema, body, context), headers: response.headers };
 }
 
 async function detailGitHubStats<TSchema extends GenericSchema>(
@@ -3111,7 +3493,7 @@ function unavailableActivitySummary(
 }
 
 async function activitySummaryState(
-  payload: OwnerActivityPayload,
+  payload: ActivitySummaryPayload & Pick<OwnerActivityPayload, "owner" | "range">,
   env: Env,
 ): Promise<OwnerActivitySummary> {
   const model = activitySummaryModel(env);
@@ -3848,6 +4230,1246 @@ function releaseProject(repo: InferOutput<typeof gitHubRepositorySchema>): Proje
   };
 }
 
+function audienceRangeFromUrl(url: URL): AudienceRange {
+  return url.searchParams.get("range")?.toLowerCase() === "week" ? "week" : "month";
+}
+
+function audienceRangeMs(range: AudienceRange): number {
+  return range === "week" ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+}
+
+function repoAudienceCacheKey(owner: string, repo: string, range: AudienceRange): string {
+  return `repo-audience:v5:${slugOwner(owner)}/${repo.toLowerCase()}:${range}`;
+}
+
+function repoAudienceUserKey(login: string): string {
+  return `audience-user:v1:${slugOwner(login)}`;
+}
+
+function repoAudienceUserOrgsKey(login: string): string {
+  return `audience-user-orgs:v1:${slugOwner(login)}`;
+}
+
+function repoAudienceUserReposKey(login: string): string {
+  return `audience-user-repos:v2:${slugOwner(login)}`;
+}
+
+function repoAudienceAgeMs(payload: RepoAudiencePayload | null): number {
+  if (!payload) return Number.POSITIVE_INFINITY;
+  const generatedAt = Date.parse(payload.generatedAt);
+  return Number.isFinite(generatedAt) ? Date.now() - generatedAt : Number.POSITIVE_INFINITY;
+}
+
+async function readRepoAudience(env: Env, key: string): Promise<RepoAudiencePayload | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(key);
+  return raw ? tryJsonParse<RepoAudiencePayload>(raw, `repo audience ${key}`) : null;
+}
+
+async function writeRepoAudience(
+  env: Env,
+  key: string,
+  payload: RepoAudiencePayload,
+): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(key, JSON.stringify(payload), {
+    expirationTtl: dashboardStorageTtlSeconds,
+  });
+}
+
+async function readAudienceUser(env: Env, login: string): Promise<GitHubUserProfile | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(repoAudienceUserKey(login));
+  return raw ? safeJsonParse(gitHubUserProfileSchema, raw, `audience user ${login}`) : null;
+}
+
+async function writeAudienceUser(env: Env, user: GitHubUserProfile): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(repoAudienceUserKey(user.login), JSON.stringify(user), {
+    expirationTtl: repoAudienceUserTtlSeconds,
+  });
+}
+
+async function readAudienceUserOrgs(
+  env: Env,
+  login: string,
+): Promise<GitHubUserOrganization[] | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(repoAudienceUserOrgsKey(login));
+  return raw
+    ? safeJsonParse(gitHubUserOrganizationListSchema, raw, `audience user orgs ${login}`)
+    : null;
+}
+
+async function writeAudienceUserOrgs(
+  env: Env,
+  login: string,
+  orgs: GitHubUserOrganization[],
+): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(repoAudienceUserOrgsKey(login), JSON.stringify(orgs), {
+    expirationTtl: repoAudienceUserTtlSeconds,
+  });
+}
+
+async function readAudienceUserRepos(
+  env: Env,
+  login: string,
+): Promise<GitHubUserRepository[] | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(repoAudienceUserReposKey(login));
+  return raw
+    ? safeJsonParse(gitHubUserRepositoryListSchema, raw, `audience user repos ${login}`)
+    : null;
+}
+
+async function writeAudienceUserRepos(
+  env: Env,
+  login: string,
+  repos: GitHubUserRepository[],
+): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(repoAudienceUserReposKey(login), JSON.stringify(repos), {
+    expirationTtl: repoAudienceUserTtlSeconds,
+  });
+}
+
+async function audienceUserProfile(
+  login: string,
+  env: Env,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-audience",
+): Promise<GitHubUserProfile | null> {
+  const cached = await readAudienceUser(env, login);
+  if (cached) return cached;
+  const user = await detailGitHubJson(
+    `/users/${encodeURIComponent(login)}`,
+    gitHubUserProfileSchema,
+    "audience user profile",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    auditArea,
+  );
+  await writeAudienceUser(env, user);
+  return user;
+}
+
+async function recentRepoStargazers(
+  owner: string,
+  repo: string,
+  path: string,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+): Promise<GitHubStargazer[]> {
+  const graphql = await recentRepoStargazersGraphql(
+    owner,
+    repo,
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+  );
+  if (graphql) return graphql;
+  return recentRepoStargazersRest(path, token, quotaSource, quotaAccount, onQuota);
+}
+
+async function recentRepoStargazersRest(
+  path: string,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+): Promise<GitHubStargazer[]> {
+  const firstPath = `${path}/stargazers?per_page=${repoAudienceStargazerLimit}`;
+  const firstPage = await detailGitHubJsonWithHeaders(
+    firstPath,
+    gitHubStargazerListSchema,
+    "repository stargazers",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    "application/vnd.github.v3.star+json",
+  );
+  const lastPage = lastPageFromLink(firstPage.headers.get("link"));
+  if (!lastPage || lastPage <= 1) return firstPage.data;
+  const lastPath = `${firstPath}&page=${lastPage}`;
+  const last = await detailGitHubJson(
+    lastPath,
+    gitHubStargazerListSchema,
+    "repository stargazers",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    "application/vnd.github.v3.star+json",
+  );
+  if (last.length >= repoAudienceStargazerLimit) return last;
+  const previous = await detailGitHubJson(
+    `${firstPath}&page=${lastPage - 1}`,
+    gitHubStargazerListSchema,
+    "repository stargazers",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    "application/vnd.github.v3.star+json",
+  );
+  return [...previous, ...last].slice(-repoAudienceStargazerLimit);
+}
+
+type GraphQLStargazerEdge = {
+  starredAt: string | null;
+  node: {
+    login: string;
+    avatarUrl: string;
+    url: string;
+  } | null;
+};
+
+type GraphQLStargazerResponse = {
+  data?: {
+    repository?: {
+      stargazers?: {
+        edges?: GraphQLStargazerEdge[];
+      } | null;
+    } | null;
+  };
+  errors?: Array<{ message?: string; type?: string }>;
+};
+
+const repoStargazersQuery = /* GraphQL */ `
+  query ReleaseBarRepoStargazers($owner: String!, $name: String!, $first: Int!) {
+    repository(owner: $owner, name: $name) {
+      stargazers(first: $first, orderBy: { field: STARRED_AT, direction: DESC }) {
+        edges {
+          starredAt
+          node {
+            login
+            avatarUrl
+            url
+          }
+        }
+      }
+    }
+  }
+`;
+
+async function recentRepoStargazersGraphql(
+  owner: string,
+  repo: string,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+): Promise<GitHubStargazer[] | null> {
+  if (!token) return null;
+  const response = await workerFetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "ReleaseBar",
+      "x-github-api-version": "2022-11-28",
+    },
+    body: JSON.stringify({
+      query: repoStargazersQuery,
+      variables: { owner, name: repo, first: repoAudienceStargazerLimit },
+    }),
+  });
+  const quota = quotaFromGitHubResponse(response, quotaSource, quotaAccount);
+  onQuota(quota);
+  auditGitHubTokenUse("repo-audience", "/graphql", response.status, quota);
+  const body = (await response.json().catch(() => null)) as GraphQLStargazerResponse | null;
+  const message = body?.errors
+    ?.map((error) => error.message ?? error.type)
+    .filter(Boolean)
+    .join("; ");
+  if (isRateLimitResponse(response, message ?? "")) {
+    throw new GitHubRateLimitError(
+      message ?? "GitHub GraphQL rate limit",
+      parseHeaderInt(response.headers.get("retry-after")),
+    );
+  }
+  if (!response.ok || body?.errors?.length) return null;
+  const edges = body?.data?.repository?.stargazers?.edges ?? [];
+  return edges
+    .filter(
+      (edge): edge is GraphQLStargazerEdge & { node: NonNullable<GraphQLStargazerEdge["node"]> } =>
+        Boolean(edge.node?.login),
+    )
+    .map((edge) => ({
+      starred_at: edge.starredAt,
+      user: {
+        login: edge.node.login,
+        avatar_url: edge.node.avatarUrl,
+        html_url: edge.node.url,
+      },
+    }));
+}
+
+async function audienceUserOrgs(
+  login: string,
+  env: Env,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+  auditArea: GitHubAuditArea = "repo-audience",
+): Promise<GitHubUserOrganization[]> {
+  const cached = await readAudienceUserOrgs(env, login);
+  if (cached) return cached;
+  const orgs = await detailGitHubJson(
+    `/users/${encodeURIComponent(login)}/orgs?per_page=20`,
+    gitHubUserOrganizationListSchema,
+    "audience user orgs",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    auditArea,
+  );
+  await writeAudienceUserOrgs(env, login, orgs);
+  return orgs;
+}
+
+async function audienceUserRepos(
+  login: string,
+  env: Env,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+  profileType: GitHubUserProfile["type"] = "User",
+  auditArea: GitHubAuditArea = "repo-audience",
+): Promise<GitHubUserRepository[]> {
+  const cached = await readAudienceUserRepos(env, login);
+  if (cached) return cached;
+  const reposPath =
+    profileType === "Organization"
+      ? `/orgs/${encodeURIComponent(login)}/repos?sort=updated&type=public&per_page=${repoAudienceUserRepoLimit}`
+      : `/users/${encodeURIComponent(login)}/repos?sort=updated&type=owner&per_page=${repoAudienceUserRepoLimit}`;
+  const repos = await detailGitHubJson(
+    reposPath,
+    gitHubUserRepositoryListSchema,
+    "audience user repositories",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    auditArea,
+  );
+  const publicRepos = repos.filter(isPublicAudienceRepository);
+  await writeAudienceUserRepos(env, login, publicRepos);
+  return publicRepos;
+}
+
+function isPublicAudienceRepository(repo: GitHubUserRepository): boolean {
+  if (repo.private === true) return false;
+  if (repo.visibility && repo.visibility !== "public") return false;
+  return true;
+}
+
+async function audienceUserInsights(
+  login: string,
+  env: Env,
+  token: string | null,
+  quotaSource: ApiQuota["source"],
+  quotaAccount: string | null,
+  onQuota: (quota: ApiQuota) => void,
+  profileType: GitHubUserProfile["type"] = "User",
+  auditArea: GitHubAuditArea = "repo-audience",
+): Promise<{ orgs: GitHubUserOrganization[]; repos: GitHubUserRepository[] }> {
+  const [orgs, repos] = await Promise.all([
+    profileType === "Organization"
+      ? Promise.resolve([])
+      : audienceUserOrgs(login, env, token, quotaSource, quotaAccount, onQuota, auditArea).catch(
+          (error) => {
+            if (isGitHubRateLimit(error)) throw error;
+            return [];
+          },
+        ),
+    audienceUserRepos(
+      login,
+      env,
+      token,
+      quotaSource,
+      quotaAccount,
+      onQuota,
+      profileType,
+      auditArea,
+    ).catch((error) => {
+      if (isGitHubRateLimit(error)) throw error;
+      return [];
+    }),
+  ]);
+  return { orgs, repos };
+}
+
+function audienceOrgSignals(orgs: GitHubUserOrganization[]): AudienceOrgSignal[] {
+  return orgs.slice(0, 8).map((org) => ({
+    login: org.login,
+    description: org.description,
+  }));
+}
+
+function audienceRepoSignals(repos: GitHubUserRepository[]): AudienceRepoSignal[] {
+  return repos
+    .filter((repo) => !repo.archived && !repo.fork)
+    .slice(0, repoAudienceUserRepoLimit)
+    .map((repo) => ({
+      fullName: repo.full_name,
+      description: repo.description,
+      url: repo.html_url,
+      language: repo.language,
+      stars: repo.stargazers_count,
+      forks: repo.forks_count,
+      updatedAt: repo.updated_at,
+      pushedAt: repo.pushed_at,
+      topics: repo.topics ?? [],
+    }));
+}
+
+function audienceUser(
+  stargazer: GitHubStargazer,
+  profile: GitHubUserProfile | null,
+  insights: { orgs: GitHubUserOrganization[]; repos: GitHubUserRepository[] } | null,
+  targetLanguage: string | null,
+  targetTopics: string[],
+): RepoAudienceUser {
+  const login = profile?.login ?? stargazer.user.login;
+  const orgs = audienceOrgSignals(insights?.orgs ?? []);
+  const repos = audienceRepoSignals(insights?.repos ?? []);
+  const score = calculateAudienceScore({
+    login,
+    followers: profile?.followers ?? 0,
+    following: profile?.following ?? 0,
+    publicRepos: profile?.public_repos ?? 0,
+    publicGists: profile?.public_gists ?? 0,
+    company: profile?.company ?? null,
+    bio: profile?.bio ?? null,
+    location: profile?.location ?? null,
+    blog: profile?.blog ?? null,
+    twitterUsername: profile?.twitter_username ?? null,
+    accountCreatedAt: profile?.created_at ?? null,
+    accountUpdatedAt: profile?.updated_at ?? null,
+    starredAt: stargazer.starred_at,
+    targetLanguage,
+    targetTopics,
+    orgs,
+    repos,
+  });
+  return {
+    login,
+    avatarUrl: profile?.avatar_url ?? stargazer.user.avatar_url,
+    url: profile?.html_url ?? stargazer.user.html_url,
+    name: profile?.name ?? null,
+    company: profile?.company ?? null,
+    bio: profile?.bio ?? null,
+    location: profile?.location ?? null,
+    followers: profile?.followers ?? 0,
+    publicRepos: profile?.public_repos ?? 0,
+    starredAt: stargazer.starred_at,
+    score: score.score,
+    tier: score.tier,
+    reasons: score.reasons,
+    dimensions: score.dimensions,
+    factors: score.factors,
+    orgs,
+    topRepositories: repos
+      .sort(
+        (a, b) => b.stars - a.stars || b.forks - a.forks || a.fullName.localeCompare(b.fullName),
+      )
+      .slice(0, 3)
+      .map((repo) => ({
+        fullName: repo.fullName,
+        url: repo.url,
+        description: repo.description,
+        language: repo.language,
+        stars: repo.stars,
+        forks: repo.forks,
+        updatedAt: repo.pushedAt ?? repo.updatedAt,
+      })),
+    accountCreatedAt: profile?.created_at ?? null,
+  };
+}
+
+function roundedPercent(value: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.round((value / total) * 100);
+}
+
+function audienceTotals(
+  users: RepoAudienceUser[],
+  totalStargazers: number,
+): RepoAudiencePayload["totals"] {
+  const count = (tier: AudienceScoreTier) => users.filter((user) => user.tier === tier).length;
+  const highSignal = count("high");
+  const mediumSignal = count("medium");
+  const lowSignal = count("low");
+  const bots = count("bot");
+  const scored = users.length;
+  return {
+    stargazers: totalStargazers,
+    stargazersSampled: scored,
+    highSignal,
+    mediumSignal,
+    lowSignal,
+    bots,
+    highSignalPercent: roundedPercent(highSignal, scored),
+    mediumSignalPercent: roundedPercent(mediumSignal, scored),
+    lowSignalPercent: roundedPercent(lowSignal, scored),
+    botPercent: roundedPercent(bots, scored),
+  };
+}
+
+function trustProfileCacheKey(login: string): string {
+  return `trust-profile:v4:${slugOwner(login)}`;
+}
+
+function trustProfileAgeMs(payload: TrustProfilePayload | null): number {
+  if (!payload) return Number.POSITIVE_INFINITY;
+  const generatedAt = Date.parse(payload.generatedAt);
+  return Number.isFinite(generatedAt) ? Date.now() - generatedAt : Number.POSITIVE_INFINITY;
+}
+
+async function readTrustProfile(env: Env, key: string): Promise<TrustProfilePayload | null> {
+  const raw = await env.DASHBOARD_CACHE?.get(key);
+  return raw ? tryJsonParse<TrustProfilePayload>(raw, `trust profile ${key}`) : null;
+}
+
+function userTrustSignal(profile: TrustProfilePayload | null): UserTrustSignal | null {
+  if (!profile || profile.profileKind !== "user_trust") return null;
+  return { score: profile.score, tier: profile.tier };
+}
+
+async function cachedUserTrustSignals(
+  env: Env,
+  logins: Array<string | null | undefined>,
+): Promise<Map<string, UserTrustSignal>> {
+  const signals = new Map<string, UserTrustSignal>();
+  if (!env.DASHBOARD_CACHE) return signals;
+  const slugs = Array.from(
+    new Set(
+      logins
+        .filter((login): login is string => Boolean(login))
+        .map(slugOwner)
+        .filter(validOwnerSlug),
+    ),
+  );
+  await Promise.all(
+    slugs.map(async (login) => {
+      const signal = userTrustSignal(await readTrustProfile(env, trustProfileCacheKey(login)));
+      if (signal) signals.set(login, signal);
+    }),
+  );
+  return signals;
+}
+
+async function withRepoAudienceTrustProfiles(
+  payload: RepoAudiencePayload,
+  env: Env,
+): Promise<RepoAudiencePayload> {
+  const signals = await cachedUserTrustSignals(
+    env,
+    payload.users.map((user) => user.login),
+  );
+  return {
+    ...payload,
+    users: payload.users.map((user) => {
+      const { trustScore: _trustScore, trustTier: _trustTier, ...base } = user;
+      const signal = signals.get(slugOwner(user.login));
+      return signal ? { ...base, trustScore: signal.score, trustTier: signal.tier } : base;
+    }),
+  };
+}
+
+async function withRepoDetailContributorTrustProfiles(
+  payload: RepoDetailPayload,
+  env: Env,
+): Promise<RepoDetailPayload> {
+  const signals = await cachedUserTrustSignals(
+    env,
+    payload.contributors.map((contributor) => contributor.login),
+  );
+  return {
+    ...payload,
+    contributors: payload.contributors.map((contributor) => {
+      const { trustScore: _trustScore, trustTier: _trustTier, ...base } = contributor;
+      const signal = signals.get(slugOwner(contributor.login));
+      return signal ? { ...base, trustScore: signal.score, trustTier: signal.tier } : base;
+    }),
+  };
+}
+
+async function writeTrustProfile(
+  env: Env,
+  key: string,
+  payload: TrustProfilePayload,
+): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(key, JSON.stringify(payload), {
+    expirationTtl: dashboardStorageTtlSeconds,
+  });
+}
+
+async function refreshTrustProfile(
+  key: string,
+  login: string,
+  request: Request,
+  env: Env,
+): Promise<void> {
+  const lock = await acquireBuildLock(env, `${key}:refresh`);
+  if (!lock) return;
+  try {
+    const payload = await buildTrustProfile(login, request, env);
+    await writeTrustProfile(env, key, payload);
+  } finally {
+    await lock.release();
+  }
+}
+
+function signalCounts(
+  values: Array<string | null | undefined>,
+  limit = 5,
+): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const name = usefulSignalName(value);
+    if (!name) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+function usefulSignalName(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function topTrustRepositories(repos: AudienceRepoSignal[]): TrustProfilePayload["topRepositories"] {
+  return repos
+    .sort((a, b) => b.stars - a.stars || b.forks - a.forks || a.fullName.localeCompare(b.fullName))
+    .slice(0, 5)
+    .map((repo) => ({
+      fullName: repo.fullName,
+      url: repo.url,
+      description: repo.description,
+      language: repo.language,
+      stars: repo.stars,
+      forks: repo.forks,
+      updatedAt: repo.pushedAt ?? repo.updatedAt,
+      topics: repo.topics,
+    }));
+}
+
+function clampProfileScore(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function scoreTier(score: number): AudienceScoreTier {
+  return score >= 70 ? "high" : score >= 40 ? "medium" : "low";
+}
+
+function retitleFactor(
+  factor: AudienceScoreFactor,
+  label: string,
+  detail: string,
+  value = factor.value,
+  maxValue = factor.maxValue,
+): AudienceScoreFactor {
+  const clamped = clampProfileScore(value);
+  return {
+    ...factor,
+    label,
+    detail,
+    value: clamped,
+    maxValue,
+    weightedValue: Math.round(clamped * factor.weight * 100) / 100,
+  };
+}
+
+function orgSignalScore(
+  base: ReturnType<typeof calculateAudienceScore>,
+  profile: GitHubUserProfile,
+  repos: AudienceRepoSignal[],
+  activeRepositories: number,
+): ReturnType<typeof calculateAudienceScore> {
+  const totalStars = repos.reduce((sum, repo) => sum + repo.stars, 0);
+  const totalForks = repos.reduce((sum, repo) => sum + repo.forks, 0);
+  const repoFootprint = clampProfileScore(
+    Math.min(Math.log10(profile.public_repos + 1) * 18, 38) +
+      Math.min(Math.log10(totalStars + totalForks + 1) * 18, 44) +
+      Math.min(activeRepositories * 4, 18),
+  );
+  const profileFields = [
+    profile.name,
+    profile.company,
+    profile.bio,
+    profile.location,
+    profile.blog,
+    profile.twitter_username,
+  ].filter((value) => typeof value === "string" && value.trim()).length;
+  const orgCredibility = clampProfileScore(
+    Math.min((daysSince(profile.created_at) ?? 0) / 90, 28) +
+      Math.min(profileFields * 8, 32) +
+      Math.min(Math.log10(profile.public_repos + 1) * 12, 24) +
+      Math.min(Math.log10(totalStars + 1) * 8, 16),
+  );
+  const reach = clampProfileScore(
+    Math.max(base.dimensions.influence, Math.min(Math.log10(totalStars + 1) * 20, 68)),
+  );
+  const dimensions = {
+    trust: orgCredibility,
+    influence: reach,
+    builder: Math.max(base.dimensions.builder, repoFootprint),
+    recency: base.dimensions.recency,
+    risk: base.dimensions.risk,
+  };
+  const score = clampProfileScore(
+    dimensions.trust * 0.24 +
+      dimensions.builder * 0.34 +
+      dimensions.influence * 0.28 +
+      dimensions.risk * 0.14,
+  );
+  const factors = base.factors
+    .filter((factor) => factor.key !== "orgs" && factor.key !== "recency")
+    .map((factor) => {
+      if (factor.key === "age") {
+        return retitleFactor(
+          factor,
+          "organization age",
+          profile.created_at
+            ? `${daysSince(profile.created_at)?.toLocaleString("en")} days on GitHub`
+            : "GitHub organization age unavailable",
+        );
+      }
+      if (factor.key === "profile") {
+        return retitleFactor(factor, "organization profile", factor.detail);
+      }
+      if (factor.key === "reach") {
+        return retitleFactor(
+          factor,
+          "project reach",
+          `${totalStars.toLocaleString("en")} stars, ${profile.followers.toLocaleString("en")} followers`,
+          reach,
+          100,
+        );
+      }
+      if (factor.key === "builder") {
+        return retitleFactor(
+          factor,
+          "repository footprint",
+          `${profile.public_repos.toLocaleString("en")} public repos, ${activeRepositories.toLocaleString("en")} recently active`,
+          repoFootprint,
+          100,
+        );
+      }
+      if (factor.key === "risk") {
+        return retitleFactor(factor, "profile safety", factor.detail);
+      }
+      return factor;
+    });
+  const reasons = [
+    "organization account",
+    profile.public_repos > 0 ? `${profile.public_repos.toLocaleString("en")} public repos` : "",
+    totalStars > 0 ? `${totalStars.toLocaleString("en")} public repo stars` : "",
+    activeRepositories > 0
+      ? `${activeRepositories.toLocaleString("en")} recently active repos`
+      : "",
+    ...base.reasons.filter(
+      (reason) =>
+        !/^\d+ public org/.test(reason) &&
+        !reason.startsWith("notable org:") &&
+        reason !== "active public builder",
+    ),
+  ].filter(Boolean);
+  return {
+    score,
+    tier: scoreTier(score),
+    reasons: reasons.length > 0 ? reasons : ["public organization signal is light"],
+    dimensions,
+    factors,
+  };
+}
+
+async function buildTrustProfile(
+  login: string,
+  request: Request,
+  env: Env,
+): Promise<TrustProfilePayload> {
+  const requestToken = await bestInstallationToken(request, env, {
+    owners: [login],
+    repos: [],
+  }).catch(() => null);
+  const token = requestToken?.token ?? env.GITHUB_TOKEN ?? null;
+  const quotaSource = requestToken?.quotaSource ?? (env.GITHUB_TOKEN ? "shared" : "anonymous");
+  const quotaAccount = requestToken?.quotaAccount ?? null;
+  let quota: ApiQuota | undefined;
+  const onQuota = (next: ApiQuota) => {
+    quota = next;
+  };
+  const profile = await audienceUserProfile(
+    login,
+    env,
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    "trust-profile",
+  );
+  if (!profile) {
+    throw new Error("GitHub profile not found");
+  }
+  const isOrg = profile.type === "Organization";
+  const { orgs, repos } = await audienceUserInsights(
+    profile.login,
+    env,
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+    profile.type,
+    "trust-profile",
+  );
+  const orgSignals = audienceOrgSignals(orgs);
+  const repoSignals = audienceRepoSignals(repos);
+  const activeRepositories = repoSignals.filter((repo) => {
+    const ageDays = daysSince(repo.pushedAt ?? repo.updatedAt);
+    return ageDays !== null && ageDays <= 180;
+  }).length;
+  const baseScore = calculateAudienceScore({
+    login: profile.login,
+    followers: profile.followers,
+    following: profile.following,
+    publicRepos: profile.public_repos,
+    publicGists: profile.public_gists,
+    company: profile.company,
+    bio: profile.bio,
+    location: profile.location,
+    blog: profile.blog,
+    twitterUsername: profile.twitter_username,
+    accountCreatedAt: profile.created_at,
+    accountUpdatedAt: profile.updated_at,
+    starredAt: null,
+    orgs: orgSignals,
+    repos: repoSignals,
+  });
+  const score = isOrg
+    ? orgSignalScore(baseScore, profile, repoSignals, activeRepositories)
+    : baseScore;
+  const generatedAt = new Date().toISOString();
+  return {
+    login: profile.login,
+    type: isOrg ? "org" : "user",
+    profileKind: isOrg ? "org_signal" : "user_trust",
+    scoreLabel: isOrg ? "org signal" : "trust score",
+    avatarUrl: profile.avatar_url,
+    url: profile.html_url,
+    name: profile.name,
+    company: profile.company,
+    bio: profile.bio,
+    location: profile.location,
+    blog: profile.blog,
+    twitterUsername: profile.twitter_username,
+    followers: profile.followers,
+    following: profile.following,
+    publicRepos: profile.public_repos,
+    publicGists: profile.public_gists,
+    accountCreatedAt: profile.created_at,
+    accountUpdatedAt: profile.updated_at,
+    accountAgeDays: daysSince(profile.created_at),
+    score: score.score,
+    tier: score.tier,
+    reasons: score.reasons,
+    dimensions: score.dimensions,
+    factors: score.factors,
+    orgs: orgSignals,
+    topRepositories: topTrustRepositories(repoSignals),
+    stats: {
+      totalStars: repoSignals.reduce((sum, repo) => sum + repo.stars, 0),
+      totalForks: repoSignals.reduce((sum, repo) => sum + repo.forks, 0),
+      recentRepositories: repoSignals.length,
+      activeRepositories,
+      publicOrganizations: orgSignals.length,
+      languages: signalCounts(repoSignals.map((repo) => repo.language)),
+      topics: signalCounts(repoSignals.flatMap((repo) => repo.topics)),
+    },
+    generatedAt,
+    cache: {
+      state: "fresh",
+      stale: false,
+      generatedAt,
+      message: isOrg
+        ? "bounded public GitHub organization signals"
+        : "bounded public GitHub profile signals",
+      ...(quota ? { quota } : {}),
+    },
+  };
+}
+
+function withTrustProfileState(
+  payload: TrustProfilePayload,
+  state: TrustProfilePayload["cache"]["state"],
+  message = payload.cache.message,
+): TrustProfilePayload {
+  return {
+    ...payload,
+    cache: {
+      ...payload.cache,
+      state,
+      stale: state !== "fresh",
+      ...(message ? { message } : {}),
+    },
+  };
+}
+
+async function trustProfileResponse(
+  request: Request,
+  env: Env,
+  context: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const login = slugOwner(decodeURIComponent(url.pathname.split("/")[3] ?? ""));
+  if (!validOwnerSlug(login)) {
+    return jsonResponse({ error: "invalid user" }, 400, { "cache-control": "no-store" });
+  }
+  const key = trustProfileCacheKey(login);
+  const cached = await readTrustProfile(env, key);
+  const ageMs = trustProfileAgeMs(cached);
+  if (cached && ageMs < repoAudienceCacheTtlMs) {
+    return jsonResponse(withTrustProfileState(cached, "fresh"));
+  }
+  if (cached && ageMs <= maxDisplayStaleMs) {
+    context.waitUntil(refreshTrustProfile(key, login, request, env).catch(() => undefined));
+    return jsonResponse(withTrustProfileState(cached, "stale", "refreshing trust profile"));
+  }
+  try {
+    const payload = await buildTrustProfile(login, request, env);
+    await writeTrustProfile(env, key, payload);
+    return jsonResponse(payload, 200, { "cache-control": "public, max-age=60" });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: dashboardErrorMessage(error),
+        cache: {
+          state: "error",
+          stale: true,
+          generatedAt: new Date().toISOString(),
+          message: dashboardErrorMessage(error),
+        },
+      },
+      errorStatus(error),
+      retryAfterHeaders(error),
+    );
+  }
+}
+
+function withRepoAudienceState(
+  payload: RepoAudiencePayload,
+  state: RepoAudiencePayload["cache"]["state"],
+  message = payload.cache.message,
+): RepoAudiencePayload {
+  return {
+    ...payload,
+    cache: {
+      ...payload.cache,
+      state,
+      stale: state !== "fresh",
+      ...(message ? { message } : {}),
+    },
+  };
+}
+
+async function buildRepoAudience(
+  owner: string,
+  repoName: string,
+  range: AudienceRange,
+  request: Request,
+  env: Env,
+  tokenOverride?: RequestToken | null,
+): Promise<RepoAudiencePayload> {
+  const fullName = `${slugOwner(owner)}/${repoName.toLowerCase()}`;
+  const requestToken =
+    tokenOverride ??
+    (await requestInstallationToken(request, env, {
+      owners: [],
+      repos: [fullName],
+    }).catch(() => null));
+  const token = requestToken?.token ?? env.GITHUB_TOKEN ?? null;
+  const quotaSource = requestToken?.quotaSource ?? (env.GITHUB_TOKEN ? "shared" : "anonymous");
+  const quotaAccount = requestToken?.quotaAccount ?? null;
+  let quota: ApiQuota | undefined;
+  const onQuota = (next: ApiQuota) => {
+    quota = next;
+  };
+  const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`;
+  const repo = await detailGitHubJson(
+    path,
+    gitHubRepositorySchema,
+    "repository audience",
+    token,
+    quotaSource,
+    quotaAccount,
+    onQuota,
+  );
+  if (repo.private) {
+    throw new Error("private repositories are not visible in public dashboards");
+  }
+  const since = Date.now() - audienceRangeMs(range);
+  const stargazers = (
+    await recentRepoStargazers(owner, repoName, path, token, quotaSource, quotaAccount, onQuota)
+  ).filter((stargazer) => {
+    const starredAt = Date.parse(stargazer.starred_at ?? "");
+    return Number.isFinite(starredAt) && starredAt >= since;
+  });
+  const profileEntries = await Promise.all(
+    stargazers.map(async (stargazer) => {
+      const profile = await audienceUserProfile(
+        stargazer.user.login,
+        env,
+        token,
+        quotaSource,
+        quotaAccount,
+        onQuota,
+      ).catch((error) => {
+        if (isGitHubRateLimit(error)) throw error;
+        return null;
+      });
+      return { stargazer, profile };
+    }),
+  );
+  const shallowUsers = profileEntries.map(({ stargazer, profile }) =>
+    audienceUser(stargazer, profile, null, repo.language, repo.topics ?? []),
+  );
+  const deepLogins = new Set(
+    shallowUsers
+      .filter((user) => user.tier !== "bot")
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          Date.parse(b.starredAt ?? "") - Date.parse(a.starredAt ?? "") ||
+          a.login.localeCompare(b.login),
+      )
+      .slice(0, repoAudienceDeepUserLimit)
+      .map((user) => user.login.toLowerCase()),
+  );
+  const users = (
+    await Promise.all(
+      profileEntries.map(async ({ stargazer, profile }) => {
+        const login = (profile?.login ?? stargazer.user.login).toLowerCase();
+        const insights = deepLogins.has(login)
+          ? await audienceUserInsights(
+              login,
+              env,
+              token,
+              quotaSource,
+              quotaAccount,
+              onQuota,
+              profile?.type ?? "User",
+            )
+          : null;
+        return audienceUser(stargazer, profile, insights, repo.language, repo.topics ?? []);
+      }),
+    )
+  ).sort(
+    (a, b) =>
+      b.score - a.score ||
+      Date.parse(b.starredAt ?? "") - Date.parse(a.starredAt ?? "") ||
+      a.login.localeCompare(b.login),
+  );
+  const generatedAt = new Date().toISOString();
+  return {
+    fullName: repo.full_name,
+    range,
+    generatedAt,
+    cache: {
+      state: "fresh",
+      stale: false,
+      generatedAt,
+      message: "public stargazer profile signals only",
+      ...(quota ? { quota } : {}),
+    },
+    totals: audienceTotals(users, repo.stargazers_count),
+    users,
+  };
+}
+
+async function refreshRepoAudience(
+  key: string,
+  owner: string,
+  repo: string,
+  range: AudienceRange,
+  request: Request,
+  env: Env,
+  tokenOverride?: RequestToken | null,
+): Promise<void> {
+  const lock = await acquireBuildLock(env, `${key}:refresh`);
+  if (!lock) return;
+  try {
+    const payload = await buildRepoAudience(owner, repo, range, request, env, tokenOverride);
+    await writeRepoAudience(env, key, payload);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function repoAudienceResponse(
+  request: Request,
+  env: Env,
+  context: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const [, , , rawOwner, rawRepo] = url.pathname.split("/");
+  const owner = slugOwner(decodeURIComponent(rawOwner ?? ""));
+  const repo = decodeURIComponent(rawRepo ?? "").toLowerCase();
+  const fullName = `${owner}/${repo}`;
+  if (!validRepoSlug(fullName)) {
+    return jsonResponse({ error: "invalid repository" }, 400, { "cache-control": "no-store" });
+  }
+  const range = audienceRangeFromUrl(url);
+  const key = repoAudienceCacheKey(owner, repo, range);
+  const cached = await readRepoAudience(env, key);
+  const ageMs = repoAudienceAgeMs(cached);
+  if (cached && ageMs < repoAudienceCacheTtlMs) {
+    return jsonResponse(
+      withRepoAudienceState(await withRepoAudienceTrustProfiles(cached, env), "fresh"),
+    );
+  }
+  const requestToken = appTokenConfigured(env)
+    ? await requestInstallationToken(request, env, {
+        owners: [],
+        repos: [fullName],
+      }).catch(() => null)
+    : null;
+  const canBuildAudience = !appTokenConfigured(env) || Boolean(requestToken);
+  if (cached && ageMs <= maxDisplayStaleMs) {
+    if (canBuildAudience) {
+      context.waitUntil(refreshRepoAudience(key, owner, repo, range, request, env, requestToken));
+    }
+    return jsonResponse(
+      withRepoAudienceState(
+        await withRepoAudienceTrustProfiles(cached, env),
+        "stale",
+        canBuildAudience
+          ? "refreshing repository audience signals"
+          : "connect the GitHub App for this repository to refresh audience signals",
+      ),
+    );
+  }
+  if (!canBuildAudience) {
+    return jsonResponse(
+      { error: "connect the GitHub App for this repository before building audience caches" },
+      403,
+      { "cache-control": "no-store" },
+    );
+  }
+
+  try {
+    const payload = await buildRepoAudience(owner, repo, range, request, env, requestToken);
+    await writeRepoAudience(env, key, payload);
+    return jsonResponse(await withRepoAudienceTrustProfiles(payload, env), 200, {
+      "cache-control": "public, max-age=60",
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: dashboardErrorMessage(error),
+        cache: {
+          state: "error",
+          stale: true,
+          generatedAt: new Date().toISOString(),
+          message: dashboardErrorMessage(error),
+        },
+      },
+      errorStatus(error),
+      retryAfterHeaders(error),
+    );
+  }
+}
+
+async function repoAudienceBackfillResponse(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "backfill requires POST" }, 405, { allow: "POST" });
+  }
+  const url = new URL(request.url);
+  const [, , , rawOwner, rawRepo] = url.pathname.split("/");
+  const owner = slugOwner(decodeURIComponent(rawOwner ?? ""));
+  const repo = decodeURIComponent(rawRepo ?? "").toLowerCase();
+  const fullName = `${owner}/${repo}`;
+  if (!validRepoSlug(fullName)) {
+    return jsonResponse({ error: "invalid repository" }, 400, { "cache-control": "no-store" });
+  }
+  const requestToken = await requestInstallationToken(request, env, {
+    owners: [],
+    repos: [fullName],
+  }).catch(() => null);
+  if (!requestToken) {
+    return jsonResponse(
+      { error: "connect the GitHub App for this repository before backfilling audience caches" },
+      403,
+      { "cache-control": "no-store" },
+    );
+  }
+  const force = url.searchParams.get("force") === "1";
+  const ranges: Array<{
+    range: AudienceRange;
+    state: "busy" | "fresh" | "rebuilt";
+    users: number;
+    generatedAt: string;
+  }> = [];
+  for (const range of repoAudienceRanges) {
+    const key = repoAudienceCacheKey(owner, repo, range);
+    const cached = await readRepoAudience(env, key);
+    const ageMs = repoAudienceAgeMs(cached);
+    if (!force && cached && ageMs < repoAudienceCacheTtlMs) {
+      ranges.push({
+        range,
+        state: "fresh",
+        users: cached.users.length,
+        generatedAt: cached.generatedAt,
+      });
+      continue;
+    }
+    const lock = await acquireBuildLock(env, `${key}:backfill`);
+    if (!lock) {
+      ranges.push({
+        range,
+        state: "busy",
+        users: cached?.users.length ?? 0,
+        generatedAt: cached?.generatedAt ?? new Date().toISOString(),
+      });
+      continue;
+    }
+    try {
+      const payload = await buildRepoAudience(owner, repo, range, request, env, requestToken);
+      await writeRepoAudience(env, key, payload);
+      ranges.push({
+        range,
+        state: "rebuilt",
+        users: payload.users.length,
+        generatedAt: payload.generatedAt,
+      });
+    } finally {
+      await lock.release();
+    }
+  }
+  return jsonResponse(
+    {
+      fullName,
+      ranges,
+      quota: {
+        source: requestToken.quotaSource,
+        account: requestToken.quotaAccount,
+      },
+      message: "bounded stargazer trust caches backfilled with GitHub App quota",
+    },
+    200,
+    { "cache-control": "no-store" },
+  );
+}
+
 function repoDetailCacheKey(owner: string, repo: string): string {
   return `repo-detail:v4:${slugOwner(owner)}/${repo.toLowerCase()}`;
 }
@@ -4139,6 +5761,23 @@ async function summarizeReleaseDelta(
   };
 }
 
+type ContributorTrustSignal = UserTrustSignal;
+
+async function cachedContributorTrustSignals(
+  env: Env,
+  contributors: Array<InferOutput<typeof gitHubContributorSchema>>,
+): Promise<Map<string, ContributorTrustSignal>> {
+  const logins = Array.from(
+    new Set(
+      contributors
+        .map((contributor) => contributor.login)
+        .filter((login): login is string => Boolean(login))
+        .map(slugOwner),
+    ),
+  );
+  return cachedUserTrustSignals(env, logins);
+}
+
 async function buildRepoDetail(
   owner: string,
   repoName: string,
@@ -4295,7 +5934,10 @@ async function buildRepoDetail(
   project.ciUrl = ci.ciUrl;
   project.ciRunDate = ci.ciRunDate;
   project.ciState = ci.ciState;
-  const releaseSummary = await releaseSummaryState(project, env);
+  const [releaseSummary, contributorTrustSignals] = await Promise.all([
+    releaseSummaryState(project, env),
+    cachedContributorTrustSignals(env, contributors),
+  ]);
 
   const generatedAt = new Date().toISOString();
   return {
@@ -4329,12 +5971,17 @@ async function buildRepoDetail(
         publishedAt: release.published_at,
         prerelease: release.prerelease ?? false,
       })),
-    contributors: contributors.map((contributor) => ({
-      login: contributor.login ?? "anonymous",
-      avatarUrl: contributor.avatar_url ?? null,
-      url: contributor.html_url ?? null,
-      commits: contributor.contributions,
-    })),
+    contributors: contributors.map((contributor) => {
+      const login = contributor.login ?? "anonymous";
+      const trustSignal = contributorTrustSignals.get(slugOwner(login));
+      return {
+        login,
+        avatarUrl: contributor.avatar_url ?? null,
+        url: contributor.html_url ?? null,
+        commits: contributor.contributions,
+        ...(trustSignal ? { trustScore: trustSignal.score, trustTier: trustSignal.tier } : {}),
+      };
+    }),
     commitActivity: (commitActivity.data ?? []).map((week) => ({
       week: new Date(week.week * 1000).toISOString(),
       total: week.total,
@@ -4524,20 +6171,27 @@ async function repoDetailResponse(
     if (releaseSummaryNeedsRefresh(cached, env)) {
       context.waitUntil(refreshReleaseSummary(key, owner, repo, cached, request, env));
     }
-    return jsonResponse(cached, 202, { "cache-control": "no-store" });
+    return jsonResponse(await withRepoDetailContributorTrustProfiles(cached, env), 202, {
+      "cache-control": "no-store",
+    });
   }
   if (cached && ageMs < repoDetailCacheTtlMs && cached.cache.state !== "warming") {
     if (releaseSummaryNeedsRefresh(cached, env)) {
       context.waitUntil(refreshReleaseSummary(key, owner, repo, cached, request, env));
     }
-    return jsonResponse(cached);
+    return jsonResponse(await withRepoDetailContributorTrustProfiles(cached, env));
   }
   if (cached && ageMs <= maxDisplayStaleMs) {
     context.waitUntil(refreshRepoDetail(key, owner, repo, request, env).catch(() => undefined));
     if (releaseSummaryNeedsRefresh(cached, env)) {
       context.waitUntil(refreshReleaseSummary(key, owner, repo, cached, request, env));
     }
-    return jsonResponse(withRepoDetailState(cached, "stale", "refreshing repository statistics"));
+    return jsonResponse(
+      await withRepoDetailContributorTrustProfiles(
+        withRepoDetailState(cached, "stale", "refreshing repository statistics"),
+        env,
+      ),
+    );
   }
 
   try {
@@ -4546,9 +6200,13 @@ async function repoDetailResponse(
     if (releaseSummaryNeedsRefresh(payload, env)) {
       context.waitUntil(refreshReleaseSummary(key, owner, repo, payload, request, env));
     }
-    return jsonResponse(payload, payload.cache.state === "warming" ? 202 : 200, {
-      "cache-control": payload.cache.state === "warming" ? "no-store" : "public, max-age=60",
-    });
+    return jsonResponse(
+      await withRepoDetailContributorTrustProfiles(payload, env),
+      payload.cache.state === "warming" ? 202 : 200,
+      {
+        "cache-control": payload.cache.state === "warming" ? "no-store" : "public, max-age=60",
+      },
+    );
   } catch (error) {
     return jsonResponse(
       {
@@ -4924,6 +6582,7 @@ async function cachedDiscoverInitialData(env: Env, url: URL): Promise<InitialPag
 }
 
 async function dashboardCacheKeyForPage(
+  request: Request,
   url: URL,
   env: Env,
   primaryOwner: string | null,
@@ -4951,22 +6610,31 @@ async function dashboardCacheKeyForPage(
   if (!primaryOwner && extraOwnerSlugs.length === 0 && includeRepos.length === 0) {
     return null;
   }
+  const ownerSlugs =
+    primaryOwner && !hiddenProfileOwners.has(primaryOwner)
+      ? [primaryOwner, ...extraOwnerSlugs]
+      : extraOwnerSlugs;
+  const tokenSources = { owners: ownerSlugs, repos: includeRepos };
+  const token = await bestInstallationToken(request, env, tokenSources).catch(() => null);
+  const includeReleaseData = await dashboardReleaseDataAllowed(request, env, tokenSources, token);
   return dashboardCacheKey({
     owner: primaryOwner ?? "custom",
     owners: extraOwnerSlugs,
     repos: includeRepos,
     salt: profile?.updatedAt,
     ...options,
+    includeReleaseData,
     schemaVersion: dashboardSchemaVersion,
   });
 }
 
 async function cachedDashboardInitialData(
+  request: Request,
   env: Env,
   url: URL,
   primaryOwner: string | null,
 ): Promise<InitialPageData | null> {
-  const key = await dashboardCacheKeyForPage(url, env, primaryOwner);
+  const key = await dashboardCacheKeyForPage(request, url, env, primaryOwner);
   const cached = key ? await readCached(env, key) : null;
   if (!cached || !canDisplayCached(cached) || cached.cache?.state === "error") return null;
   const state =
@@ -4978,15 +6646,55 @@ async function cachedDashboardInitialData(
   return { route: "dashboard", payload: withCacheState(cached, state) };
 }
 
-async function dashboardEventParts(url: URL, env: Env): Promise<{ key: string } | null> {
+async function dashboardEventParts(request: Request, env: Env): Promise<{ key: string } | null> {
+  const url = new URL(request.url);
   const rawOwner =
     url.pathname
       .replace(/^\/api\//, "")
       .replace(/\/events$/, "")
       .split("/")[0] ?? "";
   const primaryOwner = rawOwner === "dashboard" ? null : slugOwner(rawOwner);
-  const key = await dashboardCacheKeyForPage(url, env, primaryOwner);
-  return key ? { key } : null;
+  if (primaryOwner !== null && !validOwnerSlug(primaryOwner)) {
+    return null;
+  }
+  const options = optionsFromUrl(url);
+  const profile = primaryOwner ? await readProfile(env, primaryOwner) : null;
+  const hiddenProfileOwners = new Set(profile?.hiddenOwners ?? []);
+  const hiddenProfileRepos = new Set(profile?.hiddenRepos ?? []);
+  const extraOwnerSlugs = uniqueSorted([
+    ...(profile?.includeOwners ?? []),
+    ...ownerListFromUrl(url, primaryOwner ?? undefined),
+  ]).filter((owner) => owner !== primaryOwner && !hiddenProfileOwners.has(owner));
+  const includeRepos = uniqueSorted([
+    ...(profile?.includeRepos ?? []),
+    ...repoListFromUrl(url),
+  ]).filter(
+    (repo) => !hiddenProfileOwners.has(repo.split("/")[0] ?? "") && !hiddenProfileRepos.has(repo),
+  );
+  if (extraOwnerSlugs.length + includeRepos.length > maxCustomSources) {
+    return null;
+  }
+  if (!primaryOwner && extraOwnerSlugs.length === 0 && includeRepos.length === 0) {
+    return null;
+  }
+  const ownerSlugs =
+    primaryOwner && !hiddenProfileOwners.has(primaryOwner)
+      ? [primaryOwner, ...extraOwnerSlugs]
+      : extraOwnerSlugs;
+  const tokenSources = { owners: ownerSlugs, repos: includeRepos };
+  const token = await bestInstallationToken(request, env, tokenSources).catch(() => null);
+  const includeReleaseData = await dashboardReleaseDataAllowed(request, env, tokenSources, token);
+  return {
+    key: dashboardCacheKey({
+      owner: primaryOwner ?? "custom",
+      owners: extraOwnerSlugs,
+      repos: includeRepos,
+      salt: profile?.updatedAt,
+      ...options,
+      includeReleaseData,
+      schemaVersion: dashboardSchemaVersion,
+    }),
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -5003,8 +6711,7 @@ function dashboardStreamState(
 }
 
 async function ownerEventsResponse(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const parts = await dashboardEventParts(url, env);
+  const parts = await dashboardEventParts(request, env);
   if (!parts) {
     return jsonResponse({ error: "invalid dashboard event stream" }, 400, {
       "cache-control": "no-store",
@@ -5142,6 +6849,7 @@ async function rebuild(dashboard: DashboardRequest, env: Env): Promise<Dashboard
       initialProjects: progressProjects,
       skipRepos: [...scannedRepos],
       token: dashboard.token ?? env.GITHUB_TOKEN,
+      includeReleaseData: dashboard.includeReleaseData,
       quotaSource:
         dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
       quotaAccount: dashboard.quotaAccount ?? null,
@@ -5217,6 +6925,7 @@ function unresolvedDashboardRequest(
   profile: DashboardProfile | null,
   key: string,
   url: URL,
+  includeReleaseData: boolean,
   token?: RequestToken | null,
 ): DashboardRequest {
   return dashboardRequest(
@@ -5225,6 +6934,7 @@ function unresolvedDashboardRequest(
     profile,
     key,
     url,
+    includeReleaseData,
     token,
   );
 }
@@ -5409,30 +7119,34 @@ async function ownerResponse(
     primaryOwner && !hiddenProfileOwners.has(primaryOwner)
       ? [primaryOwner, ...extraOwnerSlugs]
       : extraOwnerSlugs;
+  const tokenSources = { owners: ownerSlugs, repos: includeRepos };
+  const requestToken = () => bestInstallationToken(request, env, tokenSources);
+  const token = await requestToken().catch(() => null);
+  const includeReleaseData = await dashboardReleaseDataAllowed(request, env, tokenSources, token);
   const key = dashboardCacheKey({
     owner: primaryOwner ?? "custom",
     owners: extraOwnerSlugs,
     repos: includeRepos,
     salt: profile?.updatedAt,
     ...options,
+    includeReleaseData,
     schemaVersion: dashboardSchemaVersion,
   });
   const cached = await readCached(env, key);
   const ageMs = cacheAgeMs(cached);
   const displayCached = canDisplayCached(cached);
-  const tokenSources = { owners: ownerSlugs, repos: includeRepos };
-  const requestToken = () => bestInstallationToken(request, env, tokenSources);
 
   if (displayCached && cached.cache?.state === "error") {
+    const dashboard = cachedDashboardRequest(
+      cached,
+      includeRepos,
+      key,
+      url,
+      includeReleaseData,
+      token,
+    );
     context.waitUntil(
-      requestToken()
-        .catch(() => null)
-        .then((token) => {
-          const dashboard = cachedDashboardRequest(cached, includeRepos, key, url, token);
-          return rebuildWithBuildLock(dashboard, env).catch((error) =>
-            cacheBuildError(dashboard, env, error),
-          );
-        }),
+      rebuildWithBuildLock(dashboard, env).catch((error) => cacheBuildError(dashboard, env, error)),
     );
     return jsonResponse(cached, errorStatus(cached.cache.message ?? ""), {
       "cache-control": "no-store",
@@ -5440,25 +7154,25 @@ async function ownerResponse(
   }
 
   if (displayCached && cached.cache?.progress?.done !== false && ageMs < fullTtlMs) {
-    return jsonResponse(withCacheState(cached, "fresh"));
+    return jsonResponse(withCacheState(cached, "fresh"), 200, authDependentDashboardHeaders(env));
   }
 
   if (displayCached) {
-    context.waitUntil(
-      requestToken()
-        .catch(() => null)
-        .then((token) => {
-          const dashboard = cachedDashboardRequest(cached, includeRepos, key, url, token);
-          return continueProgressiveBuild(dashboard, env).catch(() => undefined);
-        }),
+    const dashboard = cachedDashboardRequest(
+      cached,
+      includeRepos,
+      key,
+      url,
+      includeReleaseData,
+      token,
     );
+    context.waitUntil(continueProgressiveBuild(dashboard, env).catch(() => undefined));
     const state = cached.cache?.progress?.done === false ? "partial" : "stale";
     return jsonResponse(withCacheState(cached, state), 200, {
       "cache-control": "no-store",
     });
   }
 
-  const token = await requestToken().catch(() => null);
   let owners: Owner[] | null;
   try {
     owners = await resolveOwners(
@@ -5475,6 +7189,7 @@ async function ownerResponse(
       profile,
       key,
       url,
+      includeReleaseData,
       token,
     );
     const payload = errorPayload(dashboard, env, dashboardErrorMessage(error));
@@ -5487,7 +7202,15 @@ async function ownerResponse(
     });
   }
 
-  const dashboard = dashboardRequest(owners, includeRepos, profile, key, url, token);
+  const dashboard = dashboardRequest(
+    owners,
+    includeRepos,
+    profile,
+    key,
+    url,
+    includeReleaseData,
+    token,
+  );
   const build = rebuildWithBuildLock(dashboard, env);
   try {
     const payload = await Promise.race([
@@ -5528,7 +7251,7 @@ async function ownerResponse(
         "cache-control": "no-store",
       });
     }
-    return jsonResponse(payload);
+    return jsonResponse(payload, 200, authDependentDashboardHeaders(env));
   } catch (error) {
     const payload = errorPayload(dashboard, env, dashboardErrorMessage(error));
     await writeCached(env, key, payload, 5 * 60);
@@ -5541,9 +7264,18 @@ function cachedDashboardRequest(
   includeRepos: string[],
   key: string,
   url: URL,
+  includeReleaseData: boolean,
   token?: RequestToken | null,
 ): DashboardRequest {
-  return dashboardRequest(payload.owners, includeRepos, payload.profile ?? null, key, url, token);
+  return dashboardRequest(
+    payload.owners,
+    includeRepos,
+    payload.profile ?? null,
+    key,
+    url,
+    includeReleaseData,
+    token,
+  );
 }
 
 function dashboardRequest(
@@ -5552,6 +7284,7 @@ function dashboardRequest(
   profile: DashboardProfile | null,
   key: string,
   url: URL,
+  includeReleaseData: boolean,
   token?: RequestToken | null,
 ): DashboardRequest {
   return {
@@ -5561,6 +7294,7 @@ function dashboardRequest(
     subtitle: dashboardSubtitle(owners, includeRepos),
     key,
     url,
+    includeReleaseData,
     ...(token
       ? {
           token: token.token,
@@ -5635,7 +7369,9 @@ export default {
     const profileWrite =
       url.pathname.startsWith("/api/profile/") &&
       (request.method === "POST" || request.method === "DELETE");
-    if (request.method !== "GET" && !isHead && !profileWrite) {
+    const audienceBackfillWrite =
+      isRepoAudienceBackfillApiPath(url.pathname) && request.method === "POST";
+    if (request.method !== "GET" && !isHead && !profileWrite && !audienceBackfillWrite) {
       return jsonResponse({ error: "method not allowed" }, 405, { allow: "GET" });
     }
     const response = await routeRequest(request, env, context, url);
@@ -5662,6 +7398,12 @@ async function routeRequest(
       label.startsWith("@") || label.includes("/") || !validOwnerSlug(label) ? label : `@${label}`;
     return socialImage(await socialCardForLabel(title, request, env, context));
   }
+  if (url.pathname === "/openapi.json" || url.pathname === "/api/openapi.json") {
+    return jsonResponse(openApiSpec(url.origin));
+  }
+  if (url.pathname === "/api/swagger.json") {
+    return jsonResponse(openApiSpec(url.origin));
+  }
   if (url.pathname === "/api/me") {
     return meResponse(request, env);
   }
@@ -5683,14 +7425,26 @@ async function routeRequest(
   if (isRepoActivityApiPath(url.pathname)) {
     return repoActivityResponse(request, env, context);
   }
+  if (isTrustProfileApiPath(url.pathname)) {
+    return trustProfileResponse(request, env, context);
+  }
+  if (isRepoAudienceBackfillApiPath(url.pathname)) {
+    return repoAudienceBackfillResponse(request, env);
+  }
+  if (isRepoAudienceApiPath(url.pathname)) {
+    return repoAudienceResponse(request, env, context);
+  }
   if (isRepoDetailApiPath(url.pathname)) {
     return repoDetailResponse(request, env, context);
   }
-  if (url.pathname.startsWith("/api/") && url.pathname.endsWith("/events")) {
+  if (isOwnerEventsApiPath(url.pathname)) {
     return ownerEventsResponse(request, env);
   }
-  if (url.pathname.startsWith("/api/")) {
+  if (isOwnerApiPath(url.pathname)) {
     return ownerResponse(request, env, context);
+  }
+  if (url.pathname.startsWith("/api/")) {
+    return jsonResponse({ error: "not found" }, 404, { "cache-control": "no-store" });
   }
   return assetResponse(request, env);
 }

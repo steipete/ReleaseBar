@@ -104,6 +104,62 @@ export const gitHubRepositorySchema = v.looseObject({
   updated_at: v.nullable(v.string()),
 });
 
+export const gitHubStargazerSchema = v.looseObject({
+  starred_at: v.nullable(v.string()),
+  user: v.looseObject({
+    login: v.string(),
+    avatar_url: v.string(),
+    html_url: v.string(),
+  }),
+});
+
+export const gitHubStargazerListSchema = v.array(gitHubStargazerSchema);
+
+export const gitHubUserProfileSchema = v.looseObject({
+  login: v.string(),
+  avatar_url: v.string(),
+  html_url: v.string(),
+  type: v.optional(v.string()),
+  name: v.nullable(v.string()),
+  company: v.nullable(v.string()),
+  bio: v.nullable(v.string()),
+  location: v.nullable(v.string()),
+  blog: v.nullable(v.string()),
+  twitter_username: v.nullable(v.string()),
+  followers: v.number(),
+  following: v.number(),
+  public_repos: v.number(),
+  public_gists: v.number(),
+  created_at: v.nullable(v.string()),
+  updated_at: v.nullable(v.string()),
+});
+
+export const gitHubUserOrganizationSchema = v.looseObject({
+  login: v.string(),
+  avatar_url: v.string(),
+  description: v.nullable(v.string()),
+});
+
+export const gitHubUserOrganizationListSchema = v.array(gitHubUserOrganizationSchema);
+
+export const gitHubUserRepositorySchema = v.looseObject({
+  full_name: v.string(),
+  html_url: v.string(),
+  description: v.nullable(v.string()),
+  language: v.nullable(v.string()),
+  stargazers_count: v.number(),
+  forks_count: v.number(),
+  private: v.optional(v.boolean()),
+  visibility: v.optional(v.string()),
+  fork: v.boolean(),
+  archived: v.boolean(),
+  topics: v.optional(v.array(v.string())),
+  pushed_at: v.nullable(v.string()),
+  updated_at: v.nullable(v.string()),
+});
+
+export const gitHubUserRepositoryListSchema = v.array(gitHubUserRepositorySchema);
+
 export const gitHubReleaseSchema = v.looseObject({
   tag_name: v.string(),
   name: v.nullable(v.string()),
@@ -223,7 +279,11 @@ export type GitHubInstallationToken = v.InferOutput<typeof gitHubInstallationTok
 export type GitHubRepository = v.InferOutput<typeof gitHubRepositorySchema>;
 export type GitHubRelease = v.InferOutput<typeof gitHubReleaseSchema>;
 export type GitHubSearchRepository = v.InferOutput<typeof gitHubSearchRepositorySchema>;
+export type GitHubStargazer = v.InferOutput<typeof gitHubStargazerSchema>;
 export type GitHubPublicEvent = v.InferOutput<typeof gitHubPublicEventSchema>;
+export type GitHubUserOrganization = v.InferOutput<typeof gitHubUserOrganizationSchema>;
+export type GitHubUserProfile = v.InferOutput<typeof gitHubUserProfileSchema>;
+export type GitHubUserRepository = v.InferOutput<typeof gitHubUserRepositorySchema>;
 
 export function parseGitHubResponse<TSchema extends v.GenericSchema>(
   schema: TSchema,

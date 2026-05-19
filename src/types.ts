@@ -215,6 +215,68 @@ export type OwnerActivityPayload = {
   summary?: OwnerActivitySummary;
 };
 
+export type TrustProfileRepository = {
+  fullName: string;
+  url: string;
+  description: string | null;
+  language: string | null;
+  stars: number;
+  forks: number;
+  updatedAt: string | null;
+  topics: string[];
+};
+
+export type TrustProfileSignalCount = {
+  name: string;
+  count: number;
+};
+
+export type TrustProfilePayload = {
+  login: string;
+  type: "user" | "org";
+  profileKind: "user_trust" | "org_signal";
+  scoreLabel: "trust score" | "org signal";
+  avatarUrl: string;
+  url: string;
+  name: string | null;
+  company: string | null;
+  bio: string | null;
+  location: string | null;
+  blog: string | null;
+  twitterUsername: string | null;
+  followers: number;
+  following: number;
+  publicRepos: number;
+  publicGists: number;
+  accountCreatedAt: string | null;
+  accountUpdatedAt: string | null;
+  accountAgeDays: number | null;
+  score: number;
+  tier: AudienceScoreTier;
+  reasons: string[];
+  dimensions: AudienceScoreDimensions;
+  factors: AudienceScoreFactor[];
+  orgs: RepoAudienceOrg[];
+  topRepositories: TrustProfileRepository[];
+  stats: {
+    totalStars: number;
+    totalForks: number;
+    recentRepositories: number;
+    activeRepositories: number;
+    publicOrganizations: number;
+    languages: TrustProfileSignalCount[];
+    topics: TrustProfileSignalCount[];
+  };
+  generatedAt: string;
+  cache: {
+    state: "fresh" | "stale" | "error";
+    stale: boolean;
+    generatedAt: string;
+    message?: string;
+    quota?: ApiQuota;
+  };
+};
+
 export type RepoDetailActivityPayload = {
   fullName: string;
   range: ActivityRange;
@@ -245,6 +307,8 @@ export type RepoDetailContributor = {
   avatarUrl: string | null;
   url: string | null;
   commits: number;
+  trustScore?: number;
+  trustTier?: AudienceScoreTier;
 };
 
 export type RepoDetailRelease = {
@@ -295,6 +359,108 @@ export type RepoDetailReleaseSummary = {
   commitCount: number | null;
   commitsUsed: number;
   message?: string;
+};
+
+export type AudienceRange = "week" | "month";
+
+export type AudienceScoreTier = "high" | "medium" | "low" | "bot";
+
+export type AudienceScoreDimensions = {
+  trust: number;
+  influence: number;
+  builder: number;
+  recency: number;
+  risk: number;
+};
+
+export type AudienceScoreFactor = {
+  key: "age" | "profile" | "orgs" | "reach" | "builder" | "recency" | "risk";
+  label: string;
+  value: number;
+  maxValue: number;
+  weight: number;
+  weightedValue: number;
+  detail: string;
+  sentiment: "positive" | "neutral" | "negative";
+};
+
+export type RepoAudienceOrg = {
+  login: string;
+  description: string | null;
+};
+
+export type RepoAudienceTopRepository = {
+  fullName: string;
+  url: string;
+  description: string | null;
+  language: string | null;
+  stars: number;
+  forks: number;
+  updatedAt: string | null;
+};
+
+export type RepoAudienceUser = {
+  login: string;
+  avatarUrl: string;
+  url: string;
+  name: string | null;
+  company: string | null;
+  bio: string | null;
+  location: string | null;
+  followers: number;
+  publicRepos: number;
+  starredAt: string | null;
+  score: number;
+  tier: AudienceScoreTier;
+  trustScore?: number;
+  trustTier?: AudienceScoreTier;
+  reasons: string[];
+  dimensions: AudienceScoreDimensions;
+  factors: AudienceScoreFactor[];
+  orgs: RepoAudienceOrg[];
+  topRepositories: RepoAudienceTopRepository[];
+  accountCreatedAt: string | null;
+};
+
+export type RepoAudiencePayload = {
+  fullName: string;
+  range: AudienceRange;
+  generatedAt: string;
+  cache: {
+    state: "fresh" | "stale" | "warming" | "error";
+    stale: boolean;
+    generatedAt: string;
+    message?: string;
+    quota?: ApiQuota;
+  };
+  totals: {
+    stargazers: number;
+    stargazersSampled: number;
+    highSignal: number;
+    mediumSignal: number;
+    lowSignal: number;
+    bots: number;
+    highSignalPercent: number;
+    mediumSignalPercent: number;
+    lowSignalPercent: number;
+    botPercent: number;
+  };
+  users: RepoAudienceUser[];
+};
+
+export type RepoAudienceBackfillPayload = {
+  fullName: string;
+  ranges: Array<{
+    range: AudienceRange;
+    state: "busy" | "fresh" | "rebuilt";
+    users: number;
+    generatedAt: string;
+  }>;
+  quota: {
+    source: ApiQuota["source"];
+    account: string | null;
+  };
+  message: string;
 };
 
 export type RepoDetailPayload = {

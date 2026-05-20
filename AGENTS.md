@@ -10,4 +10,5 @@ Work style: terse.
 - Required GitHub secret: `CLOUDFLARE_API_TOKEN`.
 - Post-deploy smoke compares live JS/CSS hashes against local `dist/index.html`, then checks `/`, `/steipete`, `/openclaw/openclaw`, and `/api/_discover`.
 - Local prod deploy: `npx wrangler deploy`.
+- Local real-data dev: `npm run dev:worker:real` uses Wrangler `--remote` on port 8787 with real secrets and preview KV.
 - Static CI/proof: `npm run check:static`.

@@ -13,6 +13,8 @@
     "check:data": "node node_modules/.cache/releasebar-build/scripts/build.js --check",
     "check:static": "npm run typecheck && npm run lint && npm run format:check && npm run build:script && npm run build:app && npm run build:assets && npm run test",
     "dev": "vite dev --host 127.0.0.1",
+    "dev:worker": "npm exec --yes --package wrangler -- wrangler dev --port 8787",
+    "dev:worker:real": "npm exec --yes --package wrangler -- wrangler dev --remote --port 8787",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",

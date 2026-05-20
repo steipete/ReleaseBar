@@ -89,6 +89,27 @@ wrangler secret put OPENAI_API_KEY
 
 Summaries are generated server-side through the OpenAI Responses API without an explicit reasoning option. Release summaries are cached by repository, release tag, default-branch head SHA, model, and prompt version; activity summaries also refresh when the configured model changes.
 
+## Local Real-Data Testing
+
+Use Wrangler remote dev when you need local code with real Cloudflare execution, GitHub App secrets, and OpenAI/GitHub tokens:
+
+```sh
+npm run dev:worker:real
+```
+
+Open `http://localhost:8787/steipete` or any other route. This runs the current checkout on Cloudflare, so cold dashboards can use the same GitHub App credentials and real API paths as `release.bar`.
+
+For frontend hot reload, run both processes:
+
+```sh
+npm run dev
+npm run dev:worker:real
+```
+
+The Vite app falls back to `http://127.0.0.1:8787` for API calls. `npm run dev:worker` stays fully local and is useful for UI shape and tests, but it does not have production secrets unless you provide local `.dev.vars`.
+
+Because `wrangler.toml` defines a KV `preview_id`, remote dev uses the preview KV namespace instead of the production cache. It can fetch real data and warm that preview cache without mutating the live `release.bar` cache.
+
 ## Deploy
 
 The combined app/API Worker deploys with Wrangler through `.github/workflows/deploy.yml` on pushes to `main`:

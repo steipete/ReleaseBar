@@ -461,32 +461,12 @@ h1 {
 
 /* Trust profile and owner activity */
 
-.owner-tabs {
-  display: flex;
-  gap: 8px;
-  margin: -8px 0 12px;
-}
-
-.owner-tabs button {
-  min-height: 34px;
-  border-color: var(--line);
-  background: rgba(8, 9, 8, 0.45);
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.owner-tabs button.active {
-  border-color: color-mix(in srgb, var(--green) 58%, var(--line-strong));
-  background: rgba(156, 255, 87, 0.075);
-  color: var(--text);
-}
-
 .trust-snapshot {
   display: grid;
-  grid-template-columns: 120px repeat(3, minmax(0, 1fr)) minmax(180px, 1.3fr) auto;
+  grid-template-columns: 120px repeat(3, minmax(0, 1fr)) auto;
   align-items: center;
   gap: 10px;
-  margin: -2px 0 18px;
+  margin: 0 0 18px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px 16px;
@@ -524,16 +504,6 @@ h1 {
   line-height: 1;
 }
 
-.trust-snapshot p {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .trust-snapshot button {
   min-height: 32px;
   white-space: nowrap;
@@ -553,11 +523,26 @@ h1 {
 }
 
 .trust-panel {
-  margin: -2px 0 22px;
+  margin: 0 0 22px;
 }
 
 .activity-panel {
   margin: -8px 0 22px;
+}
+
+.trust-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.trust-panel-actions button {
+  min-height: 32px;
+  padding: 0 11px;
+  background: color-mix(in srgb, var(--bg) 52%, transparent);
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .activity-panel .panel-heading {
@@ -2676,7 +2661,6 @@ body.dev-mode .table-head .since-heading .label-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .owner-tabs,
   .trust-snapshot {
     margin-right: 0;
     margin-left: 0;
@@ -2686,7 +2670,6 @@ body.dev-mode .table-head .since-heading .label-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trust-snapshot p,
   .trust-snapshot button {
     grid-column: 1 / -1;
   }

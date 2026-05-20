@@ -2603,27 +2603,6 @@
       {/if}
     </section>
   {:else}
-  {#if showTrustProfile}
-    <nav class="owner-tabs" aria-label="Owner page sections">
-      <button
-        class:active={ownerTab === "overview"}
-        type="button"
-        aria-pressed={ownerTab === "overview"}
-        onclick={() => setOwnerTab("overview")}
-      >
-        overview
-      </button>
-      <button
-        class:active={ownerTab === "trust"}
-        type="button"
-        aria-pressed={ownerTab === "trust"}
-        onclick={() => setOwnerTab("trust")}
-      >
-        {ownerSignalTabLabel()}
-      </button>
-    </nav>
-  {/if}
-
   {#if showTrustProfile && ownerTab === "overview"}
     <section class="trust-snapshot" aria-label={`${ownerSignalLabel()} summary`}>
       {#if trustProfileLoading}
@@ -2652,8 +2631,7 @@
           <span>{trustProfile.type === "org" ? "footprint" : "builder"}</span>
           <strong>{numberFormat.format(trustProfile.stats.activeRepositories)} active repos</strong>
         </div>
-        <p>{audienceReasonText(trustProfile.reasons)}</p>
-        <button type="button" onclick={() => setOwnerTab("trust")}>view factors</button>
+        <button type="button" onclick={() => setOwnerTab("trust")}>factors</button>
       {:else}
         <span class="panel-kicker">{ownerSignalTabLabel()}</span>
         <strong>pending</strong>
@@ -2669,9 +2647,12 @@
           <span class="panel-kicker">{ownerSignalTabLabel()}</span>
           <h2>{trustProfile ? `${trustProfile.score}` : "loading"}</h2>
         </div>
-        {#if trustProfile}
-          <span class={`audience-tier tier-${trustProfile.tier}`}>{trustProfile.tier}</span>
-        {/if}
+        <div class="trust-panel-actions">
+          <button type="button" onclick={() => setOwnerTab("overview")}>overview</button>
+          {#if trustProfile}
+            <span class={`audience-tier tier-${trustProfile.tier}`}>{trustProfile.tier}</span>
+          {/if}
+        </div>
       </div>
 
       {#if trustProfileLoading}

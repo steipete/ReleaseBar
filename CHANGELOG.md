@@ -3,6 +3,16 @@
 ## Unreleased
 
 - Embed cached public dashboard and repository payloads in served app shells so warm routes render without an initial loading panel.
+- Added OpenAPI/Swagger JSON endpoints for the public trust and audience APIs.
+- Refined trust UI labels, audience percentage summaries, contributor score pills, and external-link markers.
+- Documented the public REST API contract for cached trust profiles and repository audience signals, including agent PR-triage guidance.
+- Added repository audience analysis from recent public stargazers, with week/month filters, cached trust/klout dimensions, public org signals, and recent repo evidence.
+- Added bounded GitHub trust profiles to owner pages with account age, score dimensions, public orgs, and recent repository evidence.
+- Added weighted trust-score factors so profile scores show the age, profile, org, reach, builder, recency, and account-safety inputs behind the number.
+- Rebalanced trust scoring around trust, builder, reach, and positive account safety, dropping repository fit from the surfaced score.
+- Added GitHub App-only audience backfill for repository stargazer trust caches, keeping batch warming off shared API quota.
+- Moved detailed trust scoring into a profile tab and kept a compact trust snapshot on the main owner page.
+- Skipped release hydration on unsynced public dashboards so stargazer profile links do not burn shared GitHub API quota.
 - Clarify repository activity summaries by showing the selected activity range instead of a misleading commit count.
 - Show repository names in full in repository detail hero titles, with owner context kept in the breadcrumb/avatar.
 - Renamed the header wordmark and page-title suffix from `ReleaseBar` to `release.bar` to match the domain.

@@ -2,7 +2,7 @@
 
 Release freshness dashboard for public GitHub users and orgs.
 
-ReleaseBar tracks public GitHub repository release health: latest version, release date, commits since release, activity, stars, language, topics, open work, and CI status. It serves cached dashboards for routes like `https://release.bar/steipete`, `https://release.bar/openclaw`, and `https://release.bar/microsoft`.
+ReleaseBar tracks public GitHub repository release health: latest version, release date, commits since release, activity, stars, language, topics, open work, CI status, and recent stargazer audience signals. It serves cached dashboards for routes like `https://release.bar/steipete`, `https://release.bar/openclaw`, and `https://release.bar/microsoft`.
 
 Owner dashboards show visible public repositories immediately with lightweight repo metadata, then progressively hydrate release, commit, PR, and CI data in the background.
 
@@ -37,22 +37,29 @@ Set `GITHUB_TOKEN` for higher API limits. GitHub Actions uses the built-in token
 - settings can hide visible owners or repos locally without changing the shared cache
 - GitHub App login uses `/api/auth/login`, `/api/auth/callback`, `/api/auth/install`, `/api/auth/logout`, and `/api/me`
 - `Connect GitHub` signs the user in, checks GitHub App installations, and sends them to install the app when the current dashboard source is not covered
+- GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; public unsynced dashboards stay metadata-only and skip release hydration
+- repository audience backfill is GitHub App-only and warms bounded week/month stargazer trust caches for covered repositories
 - GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; once an account installation is known, public refreshes for that account can use its app quota even for anonymous viewers
 - private repositories are ignored even when selected in GitHub App installation; ReleaseBar only stores and renders public repository metadata
 - the need-attention metric filters repos with unreleased commits, stale releases, failing/cancelled CI, or issue/PR pressure and rows show the reason inline
-- repository detail pages include release cadence, recent releases, contributors, languages, commit/churn charts, and 30-day issue/PR trend counts when GitHub provides them
+- owner pages show bounded people trust or org signal profiles with GitHub age, reach, footprint, safety dimensions, weighted score factors, and recent repository evidence
+- repository detail pages include release cadence, recent releases, contributors, languages, commit/churn charts, recent public stargazer audience signals, and 30-day issue/PR trend counts when GitHub provides them
 - repository detail pages can show an AI summary of commit titles since the latest release when the Worker has an OpenAI API key
 
 ## API And Cache
 
-The Worker in `worker/index.ts` serves both the static app shell and the generic owner API:
+The Worker in `worker/index.ts` serves both the static app shell and the generic owner API. See [docs/api.md](docs/api.md) for the public REST contract, response shapes, cache semantics, and agent PR-triage guidance.
 
 - `GET /api/:owner` returns a cached dashboard for a public GitHub user or org
 - `GET /api/:owner/events` streams cache updates for progressive rebuilds
+- `GET /api/users/:login/trust` returns cached public people trust or organization signal scoring, account age, score dimensions, and weighted score factors for one GitHub profile
 - `GET /api/repos/:owner/:repo` returns repository detail stats
+- `GET /api/repos/:owner/:repo/audience?range=week|month` returns cached recent stargazer scoring from public GitHub profile fields
+- `POST /api/repos/:owner/:repo/audience/backfill` warms bounded week/month stargazer trust caches with GitHub App quota only
+- `GET /openapi.json`, `GET /api/openapi.json`, and `GET /api/swagger.json` expose the public API as Swagger-compatible OpenAPI 3.1 JSON
 - `GET /api/_discover` and `GET /api/_hot` power the root dashboard
 
-Dashboard builds validate public GitHub owners, scan up to the 200 most recently pushed public repositories per owner, and hydrate repositories in 12-repository batches. Dashboard payloads, repo fragments, hot boards, app-installation coverage, profile settings, and auth session data live in Cloudflare KV. A Durable Object binding (`DASHBOARD_LOCKS`) prevents repeated cold requests from stampeding GitHub.
+Dashboard builds validate public GitHub owners and scan up to the 200 most recently pushed public repositories per owner. Release hydration runs in 12-repository batches only when the dashboard is backed by GitHub App quota; unsynced public dashboards show bounded repository metadata without release, compare, commit, or check-run calls. Dashboard payloads, repo fragments, hot boards, app-installation coverage, profile settings, and auth session data live in Cloudflare KV. A Durable Object binding (`DASHBOARD_LOCKS`) prevents repeated cold requests from stampeding GitHub.
 
 Fresh dashboard cache is served for about 1h. Stale or partial cache is shown while a background rebuild continues, so large owners can show useful rows before all release data finishes. Dashboard records are retained longer than the fresh window so older public data can remain visible during GitHub outages or rate limits, with the UI marking stale/partial state.
 

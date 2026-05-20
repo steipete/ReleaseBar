@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
+import { calculateAudienceScore, isLikelyBot } from "./audience.js";
 import {
   buildDashboard,
   dashboardCacheKey,
@@ -18,6 +19,7 @@ import {
   ownerDashboardPath,
   optionsFromSearch,
   ownerFromPath,
+  fallbackApiOrigin,
   repoDetailPath,
   repoFromPath,
   workerApiOrigin,
@@ -36,8 +38,11 @@ import type {
   DashboardPayload,
   OwnerActivityPayload,
   Project,
+  AudienceRange,
+  RepoAudiencePayload,
   RepoDetailActivityPayload,
   RepoDetailPayload,
+  TrustProfilePayload,
 } from "../../src/types.js";
 import worker, { DashboardBuildLock } from "../../worker/index.js";
 
@@ -224,6 +229,14 @@ test("owner route parsing keeps root hot board and owners API-backed", () => {
     `${workersDevApiOrigin}/api/dashboard?owners=openclaw`,
   );
   assert.equal(
+    fallbackApiOrigin({ protocol: "http:", hostname: "127.0.0.1", port: "5174" }),
+    "http://127.0.0.1:8787",
+  );
+  assert.equal(
+    fallbackApiOrigin({ protocol: "http:", hostname: "localhost", port: "8787" }),
+    workersDevApiOrigin,
+  );
+  assert.equal(
     dashboardRoute(
       "/openclaw",
       "?q=codex&lang=Swift&filter=attention&sort=issues&dir=desc&dev=true",
@@ -376,6 +389,130 @@ test("repository detail hides unavailable code churn", () => {
     }),
     true,
   );
+});
+
+test("audience scoring uses only public profile and stargazer signals", () => {
+  assert.equal(isLikelyBot("dependabot"), true);
+  const bot = calculateAudienceScore({
+    login: "github-actions[bot]",
+    followers: 100000,
+    following: 0,
+    publicRepos: 100,
+    publicGists: 0,
+    company: "GitHub",
+    bio: "Automation",
+    location: "CI",
+    blog: null,
+    twitterUsername: null,
+    accountCreatedAt: "2018-01-01T00:00:00Z",
+    accountUpdatedAt: "2026-05-18T00:00:00Z",
+    starredAt: "2026-05-18T00:00:00Z",
+  });
+  assert.equal(bot.score, 0);
+  assert.equal(bot.tier, "bot");
+  assert.deepEqual(bot.reasons, ["automation account"]);
+  assert.deepEqual(bot.dimensions, {
+    trust: 0,
+    influence: 0,
+    builder: 0,
+    recency: 0,
+    risk: 0,
+  });
+  assert.equal(bot.factors[0]?.key, "risk");
+  assert.equal(bot.factors[0]?.label, "account safety");
+  assert.equal(bot.factors[0]?.sentiment, "negative");
+
+  const high = calculateAudienceScore({
+    login: "human",
+    followers: 2500,
+    following: 100,
+    publicRepos: 90,
+    publicGists: 4,
+    company: "GitHub",
+    bio: "Principal software engineer working on developer tools",
+    location: "San Francisco",
+    blog: "https://human.dev",
+    twitterUsername: "human",
+    accountCreatedAt: "2015-01-01T00:00:00Z",
+    starredAt: new Date().toISOString(),
+    targetLanguage: "TypeScript",
+    orgs: [{ login: "github", description: "How people build software" }],
+    repos: [
+      {
+        fullName: "human/toolkit",
+        description: "Developer tools",
+        url: "https://github.com/human/toolkit",
+        language: "TypeScript",
+        stars: 450,
+        forks: 20,
+        updatedAt: new Date().toISOString(),
+        pushedAt: new Date().toISOString(),
+        topics: ["developer-tools"],
+      },
+    ],
+  });
+  assert.equal(high.tier, "high");
+  assert.ok(high.score >= 70);
+  assert.ok(high.reasons.includes("known tech company"));
+  assert.ok(high.reasons.includes("notable org: github"));
+  assert.ok(high.dimensions.trust >= 80);
+  assert.equal(high.dimensions.risk, 100);
+  assert.equal(high.factors.find((factor) => factor.key === "age")?.label, "account age");
+  assert.deepEqual(
+    high.factors.map((factor) => factor.key),
+    ["age", "profile", "orgs", "reach", "builder", "recency", "risk"],
+  );
+  assert.ok((high.factors.find((factor) => factor.key === "builder")?.weightedValue ?? 0) > 0);
+  const profileOnly = calculateAudienceScore({
+    login: "human",
+    followers: 2500,
+    following: 100,
+    publicRepos: 90,
+    publicGists: 4,
+    company: "GitHub",
+    bio: "Principal software engineer working on developer tools",
+    location: "San Francisco",
+    blog: "https://human.dev",
+    twitterUsername: "human",
+    accountCreatedAt: "2015-01-01T00:00:00Z",
+    starredAt: null,
+    targetLanguage: "TypeScript",
+    orgs: [{ login: "github", description: "How people build software" }],
+    repos: [
+      {
+        fullName: "human/toolkit",
+        description: "Developer tools",
+        url: "https://github.com/human/toolkit",
+        language: "TypeScript",
+        stars: 450,
+        forks: 20,
+        updatedAt: new Date().toISOString(),
+        pushedAt: new Date().toISOString(),
+        topics: ["developer-tools"],
+      },
+    ],
+  });
+  assert.equal(profileOnly.factors.find((factor) => factor.key === "recency")?.weight, 0);
+  assert.equal(profileOnly.tier, "high");
+  assert.equal(
+    Math.round(profileOnly.factors.reduce((sum, factor) => sum + factor.weightedValue, 0)),
+    profileOnly.score,
+  );
+
+  const low = calculateAudienceScore({
+    login: "quiet-user",
+    followers: 2,
+    following: 0,
+    publicRepos: 1,
+    publicGists: 0,
+    company: null,
+    bio: null,
+    location: null,
+    starredAt: null,
+  });
+  assert.equal(low.tier, "low");
+  assert.ok(low.score < 40);
+  assert.equal(low.factors.find((factor) => factor.key === "risk")?.sentiment, "negative");
 });
 
 test("need attention explains release debt, stale releases, CI, and open work", () => {
@@ -648,6 +785,58 @@ test("worker embeds cached public dashboard data in the app shell", async () => 
   assert.match(html, /"route":"dashboard"/);
   assert.match(html, /acme\\u002freleasebar|acme\/releasebar/);
   assert.ok(html.indexOf('id="releasebar-initial-data"') < html.indexOf('<script type="module"'));
+});
+
+test("worker embeds cached metadata-only owner dashboard data in the app shell", async () => {
+  const payload = testDashboard("owner", [
+    testProject({
+      owner: "owner",
+      name: "repo",
+      version: "repo search",
+      releaseDate: null,
+      commitsSinceRelease: null,
+      compareUrl: null,
+    }),
+  ]);
+  payload.options = { ...payload.options!, includeUnreleased: true };
+  payload.cache = {
+    ...payload.cache!,
+    message: "release scan skipped until GitHub App quota is available",
+  };
+  const key = dashboardCacheKey({
+    owner: "owner",
+    includeUnreleased: true,
+    includeReleaseData: false,
+    schemaVersion: 5,
+  });
+  const response = await worker.fetch(
+    new Request("https://release.bar/owner", { headers: { cookie: "rd_session=bogus" } }),
+    {
+      ASSETS: {
+        fetch: async (request: Request) => {
+          assert.equal(new URL(request.url).pathname, "/index.html");
+          return new Response(
+            '<title>ReleaseBar</title><script type="module" src="/assets/index.js"></script>',
+            { headers: { "content-type": "text/html" } },
+          );
+        },
+      },
+      DASHBOARD_CACHE: kvStore({
+        [key]: JSON.stringify(payload),
+      }),
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_PRIVATE_KEY: "not-a-private-key",
+    },
+    { waitUntil: () => undefined },
+  );
+
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.equal(response.headers.get("vary"), "cookie");
+  assert.match(html, /id="releasebar-initial-data"/);
+  assert.match(html, /owner\\u002frepo|owner\/repo/);
+  assert.match(html, /release scan skipped/);
 });
 
 test("worker embeds cached language-filtered discover data in the app shell", async () => {
@@ -1305,7 +1494,16 @@ test("worker builds cached repository detail with releases and stats", async () 
     throw new Error(`unexpected fetch ${url.pathname}`);
   };
   const env = {
-    DASHBOARD_CACHE: kvStore(),
+    DASHBOARD_CACHE: kvStore({
+      "trust-profile:v4:octo": JSON.stringify({
+        login: "octo",
+        profileKind: "user_trust",
+        scoreLabel: "trust score",
+        score: 73,
+        tier: "high",
+        generatedAt: "2026-05-16T12:00:00Z",
+      }),
+    }),
     GITHUB_TOKEN: "shared-token",
   };
   try {
@@ -1325,6 +1523,8 @@ test("worker builds cached repository detail with releases and stats", async () 
     assert.equal(body.project.ciWorkflow, "Lint");
     assert.equal(body.releases.length, 2);
     assert.equal(body.contributors[0]?.login, "octo");
+    assert.equal(body.contributors[0]?.trustScore, 73);
+    assert.equal(body.contributors[0]?.trustTier, "high");
     assert.equal(body.commitActivity[0]?.total, 7);
     assert.equal(body.codeFrequency[0]?.additions, 120);
     assert.equal(body.codeFrequency[0]?.deletions, 20);
@@ -1337,13 +1537,1089 @@ test("worker builds cached repository detail with releases and stats", async () 
       ["TypeScript", "CSS"],
     );
 
+    await env.DASHBOARD_CACHE.put(
+      "trust-profile:v4:octo",
+      JSON.stringify({
+        login: "octo",
+        profileKind: "user_trust",
+        scoreLabel: "trust score",
+        score: 62,
+        tier: "medium",
+        generatedAt: "2026-05-16T12:05:00Z",
+      }),
+    );
     const cached = await worker.fetch(
       new Request("https://release.bar/api/repos/acme/releasebar"),
       env,
       { waitUntil: () => undefined },
     );
     assert.equal(cached.status, 200);
+    const cachedBody = (await cached.json()) as RepoDetailPayload;
+    assert.equal(cachedBody.contributors[0]?.trustScore, 62);
+    assert.equal(cachedBody.contributors[0]?.trustTier, "medium");
     assert.equal(calls, 14);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker builds cached repository audience from public stargazers", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (input, init) => {
+    calls += 1;
+    const url = new URL(String(input));
+    const path = url.pathname;
+    if (path === "/repos/acme/releasebar") {
+      return Response.json({
+        owner: { login: "acme" },
+        name: "releasebar",
+        full_name: "acme/releasebar",
+        private: false,
+        fork: false,
+        archived: false,
+        html_url: "https://github.com/acme/releasebar",
+        description: "Release dashboard",
+        default_branch: "main",
+        language: "TypeScript",
+        topics: [],
+        stargazers_count: 1234,
+        forks_count: 45,
+        open_issues_count: 9,
+        pushed_at: "2026-05-16T12:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/graphql") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        variables?: { owner?: string; name?: string; first?: number };
+      };
+      assert.equal(body.variables?.owner, "acme");
+      assert.equal(body.variables?.name, "releasebar");
+      assert.equal(body.variables?.first, 30);
+      return Response.json({
+        data: {
+          repository: {
+            stargazers: {
+              edges: [
+                {
+                  starredAt: new Date().toISOString(),
+                  node: {
+                    login: "principal",
+                    avatarUrl: "https://avatars.githubusercontent.com/u/10",
+                    url: "https://github.com/principal",
+                  },
+                },
+                {
+                  starredAt: new Date().toISOString(),
+                  node: {
+                    login: "quiet",
+                    avatarUrl: "https://avatars.githubusercontent.com/u/11",
+                    url: "https://github.com/quiet",
+                  },
+                },
+                {
+                  starredAt: new Date().toISOString(),
+                  node: {
+                    login: "renovate-bot",
+                    avatarUrl: "https://avatars.githubusercontent.com/u/12",
+                    url: "https://github.com/renovate-bot",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      });
+    }
+    if (path === "/repos/acme/releasebar/stargazers") {
+      const headers = init?.headers as Record<string, string> | undefined;
+      assert.equal(headers instanceof Headers, false);
+      assert.match(String(headers?.accept), /star\+json/);
+      if (url.searchParams.get("page") !== "3") {
+        return Response.json(
+          [
+            {
+              starred_at: "2020-01-01T00:00:00Z",
+              user: {
+                login: "old",
+                avatar_url: "https://avatars.githubusercontent.com/u/9",
+                html_url: "https://github.com/old",
+              },
+            },
+          ],
+          {
+            headers: {
+              link: '<https://api.github.com/repos/acme/releasebar/stargazers?per_page=30&page=3>; rel="last"',
+            },
+          },
+        );
+      }
+      return Response.json([
+        {
+          starred_at: new Date().toISOString(),
+          user: {
+            login: "principal",
+            avatar_url: "https://avatars.githubusercontent.com/u/10",
+            html_url: "https://github.com/principal",
+          },
+        },
+        {
+          starred_at: new Date().toISOString(),
+          user: {
+            login: "quiet",
+            avatar_url: "https://avatars.githubusercontent.com/u/11",
+            html_url: "https://github.com/quiet",
+          },
+        },
+        {
+          starred_at: new Date().toISOString(),
+          user: {
+            login: "renovate-bot",
+            avatar_url: "https://avatars.githubusercontent.com/u/12",
+            html_url: "https://github.com/renovate-bot",
+          },
+        },
+      ]);
+    }
+    if (path === "/users/principal") {
+      return Response.json({
+        login: "principal",
+        avatar_url: "https://avatars.githubusercontent.com/u/10",
+        html_url: "https://github.com/principal",
+        type: "User",
+        name: "Principal Engineer",
+        company: "GitHub",
+        bio: "Principal software engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://principal.dev",
+        twitter_username: "principal",
+        followers: 2500,
+        following: 120,
+        public_repos: 80,
+        public_gists: 9,
+        created_at: "2012-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/users/principal/orgs") {
+      return Response.json([
+        {
+          login: "github",
+          avatar_url: "https://avatars.githubusercontent.com/u/9919",
+          description: "How people build software",
+        },
+        {
+          login: "acme",
+          avatar_url: "https://avatars.githubusercontent.com/u/20",
+          description: "Developer tools",
+        },
+      ]);
+    }
+    if (path === "/users/principal/repos") {
+      return Response.json([
+        {
+          full_name: "principal/release-tools",
+          html_url: "https://github.com/principal/release-tools",
+          description: "Release tooling",
+          language: "TypeScript",
+          stargazers_count: 350,
+          forks_count: 24,
+          fork: false,
+          archived: false,
+          topics: ["release", "developer-tools"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    }
+    if (path === "/users/quiet") {
+      return Response.json({
+        login: "quiet",
+        avatar_url: "https://avatars.githubusercontent.com/u/11",
+        html_url: "https://github.com/quiet",
+        type: "User",
+        name: null,
+        company: null,
+        bio: null,
+        location: null,
+        blog: null,
+        twitter_username: null,
+        followers: 2,
+        following: 0,
+        public_repos: 1,
+        public_gists: 0,
+        created_at: "2026-05-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/users/quiet/orgs") {
+      return Response.json([]);
+    }
+    if (path === "/users/quiet/repos") {
+      return Response.json([]);
+    }
+    if (path === "/users/renovate-bot") {
+      return Response.json({
+        login: "renovate-bot",
+        avatar_url: "https://avatars.githubusercontent.com/u/12",
+        html_url: "https://github.com/renovate-bot",
+        type: "Bot",
+        name: null,
+        company: null,
+        bio: null,
+        location: null,
+        blog: null,
+        twitter_username: null,
+        followers: 1000,
+        following: 0,
+        public_repos: 100,
+        public_gists: 0,
+        created_at: "2015-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = {
+    DASHBOARD_CACHE: kvStore({
+      "trust-profile:v4:principal": JSON.stringify({
+        login: "principal",
+        profileKind: "user_trust",
+        scoreLabel: "trust score",
+        score: 88,
+        tier: "high",
+        generatedAt: "2026-05-16T12:00:00Z",
+      }),
+    }),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as RepoAudiencePayload;
+    assert.equal(body.fullName, "acme/releasebar");
+    assert.equal(body.range, "month");
+    assert.equal(body.users[0]?.login, "principal");
+    assert.equal(body.users[0]?.tier, "high");
+    assert.equal(body.users[0]?.trustScore, 88);
+    assert.equal(body.users[0]?.trustTier, "high");
+    assert.ok((body.users[0]?.dimensions.trust ?? 0) >= 80);
+    assert.equal(body.users[0]?.orgs[0]?.login, "github");
+    assert.equal(body.users[0]?.topRepositories[0]?.fullName, "principal/release-tools");
+    assert.match(body.users[0]?.reasons.join(" ") ?? "", /notable org: github/);
+    assert.equal(body.totals.stargazers, 1234);
+    assert.equal(body.totals.highSignal, 1);
+    assert.equal(body.totals.bots, 1);
+    assert.equal(body.totals.highSignalPercent, 33);
+    assert.equal(body.totals.mediumSignalPercent, 0);
+    assert.equal(body.totals.lowSignalPercent, 33);
+    assert.equal(body.totals.botPercent, 33);
+    assert.equal(body.cache.quota?.source, "shared");
+
+    const cached = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(cached.status, 200);
+    assert.equal(calls, 9);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker REST stargazer fallback samples newest stargazers", async () => {
+  const originalFetch = globalThis.fetch;
+  const stargazerPages: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    if (path === "/repos/acme/restbar") {
+      return Response.json({
+        owner: { login: "acme" },
+        name: "restbar",
+        full_name: "acme/restbar",
+        private: false,
+        fork: false,
+        archived: false,
+        html_url: "https://github.com/acme/restbar",
+        description: "REST fallback",
+        default_branch: "main",
+        language: "TypeScript",
+        topics: [],
+        stargazers_count: 31,
+        forks_count: 1,
+        open_issues_count: 0,
+        pushed_at: "2026-05-16T12:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/repos/acme/restbar/stargazers") {
+      const headers = init?.headers as Record<string, string> | undefined;
+      assert.match(String(headers?.accept), /star\+json/);
+      stargazerPages.push(url.searchParams.get("page") ?? "first");
+      if (url.searchParams.get("page") !== "2") {
+        return Response.json(
+          [
+            {
+              starred_at: new Date().toISOString(),
+              user: {
+                login: "previous",
+                avatar_url: "https://avatars.githubusercontent.com/u/10",
+                html_url: "https://github.com/previous",
+              },
+            },
+          ],
+          !url.searchParams.has("page")
+            ? {
+                headers: {
+                  link: '<https://api.github.com/repos/acme/restbar/stargazers?per_page=30&page=2>; rel="last"',
+                },
+              }
+            : undefined,
+        );
+      }
+      return Response.json([
+        {
+          starred_at: new Date().toISOString(),
+          user: {
+            login: "newest",
+            avatar_url: "https://avatars.githubusercontent.com/u/11",
+            html_url: "https://github.com/newest",
+          },
+        },
+      ]);
+    }
+    const user = path.match(/^\/users\/([^/]+)$/)?.[1];
+    if (user === "previous" || user === "newest") {
+      return Response.json({
+        login: user,
+        avatar_url: `https://avatars.githubusercontent.com/u/${user === "previous" ? "10" : "11"}`,
+        html_url: `https://github.com/${user}`,
+        type: "User",
+        name: user,
+        company: null,
+        bio: null,
+        location: null,
+        blog: null,
+        twitter_username: null,
+        followers: user === "newest" ? 20 : 10,
+        following: 1,
+        public_repos: 2,
+        public_gists: 0,
+        created_at: "2020-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/users/previous/orgs" || path === "/users/newest/orgs") {
+      return Response.json([]);
+    }
+    if (path === "/users/previous/repos" || path === "/users/newest/repos") {
+      return Response.json([]);
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/restbar/audience"),
+      { DASHBOARD_CACHE: kvStore() },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as RepoAudiencePayload;
+    assert.deepEqual(stargazerPages, ["first", "2", "1"]);
+    assert.deepEqual(body.users.map((user) => user.login).sort(), ["newest", "previous"]);
+    assert.equal(body.totals.stargazers, 31);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker serves OpenAPI spec aliases for Swagger tooling", async () => {
+  const env = { DASHBOARD_CACHE: kvStore() };
+  for (const path of ["/openapi.json", "/api/openapi.json", "/api/swagger.json"]) {
+    const response = await worker.fetch(new Request(`https://release.bar${path}`), env, {
+      waitUntil: () => undefined,
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      openapi?: string;
+      paths?: Record<string, unknown>;
+    };
+    assert.equal(body.openapi, "3.1.0");
+    assert.ok(body.paths?.["/api/users/{login}/trust"]);
+    assert.ok(body.paths?.["/api/repos/{owner}/{repo}/audience"]);
+  }
+});
+
+test("worker rejects malformed nested owner API paths", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    throw new Error(`unexpected fetch ${String(input)}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/openclaw/openclaw/audience"),
+      { DASHBOARD_CACHE: kvStore() },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 404);
+    const body = (await response.json()) as { error?: string };
+    assert.equal(body.error, "not found");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker keeps unsynced app-configured audience GETs off shared quota", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    throw new Error(`unexpected fetch ${String(input)}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience"),
+      {
+        DASHBOARD_CACHE: kvStore(),
+        GITHUB_APP_ID: "123",
+        GITHUB_APP_PRIVATE_KEY: "private-key",
+        GITHUB_TOKEN: "shared-token",
+      },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = (await response.json()) as { error?: string };
+    assert.match(body.error ?? "", /GitHub App/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker only backfills repository audience caches with GitHub App quota", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    throw new Error(`unexpected fetch ${String(input)}`);
+  };
+  try {
+    const denied = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience/backfill", {
+        method: "POST",
+      }),
+      { DASHBOARD_CACHE: kvStore(), GITHUB_TOKEN: "shared-token" },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(denied.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const sessionId = "audience-backfill";
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const authCookie = await signedJson("test-secret", { id: sessionId, exp });
+  const cache = kvStore({
+    [`auth:session:${sessionId}`]: JSON.stringify({
+      user: {
+        id: 1,
+        login: "octocat",
+        name: null,
+        avatarUrl: "https://avatars.githubusercontent.com/u/1",
+        url: "https://github.com/octocat",
+      },
+      accessToken: "user-token",
+      iat: exp - 600,
+      exp,
+    }),
+  });
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: cache,
+    GITHUB_APP_CLIENT_ID: "Iv123",
+    GITHUB_APP_CLIENT_SECRET: "client-secret",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+    GITHUB_APP_SLUG: "releasebar-app",
+  };
+  let appCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (path === "/user/installations") {
+      assert.equal(authorization, "Bearer user-token");
+      return Response.json({
+        installations: [
+          {
+            id: 1,
+            account: {
+              login: "acme",
+              type: "Organization",
+              avatar_url: "https://avatars.githubusercontent.com/u/2",
+              html_url: "https://github.com/acme",
+            },
+            html_url: "https://github.com/organizations/acme/settings/installations/1",
+            repository_selection: "all",
+            target_type: "Organization",
+          },
+        ],
+      });
+    }
+    if (path === "/app/installations/1/access_tokens") {
+      assert.match(authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      return Response.json({ token: "installation-token" });
+    }
+    if (path === "/repos/acme/releasebar") {
+      appCalls += 1;
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json({
+        owner: { login: "acme" },
+        name: "releasebar",
+        full_name: "acme/releasebar",
+        private: false,
+        fork: false,
+        archived: false,
+        html_url: "https://github.com/acme/releasebar",
+        description: "Release dashboard",
+        default_branch: "main",
+        language: "TypeScript",
+        topics: ["developer-tools"],
+        stargazers_count: 1234,
+        forks_count: 45,
+        open_issues_count: 9,
+        pushed_at: "2026-05-16T12:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/graphql") {
+      appCalls += 1;
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json({
+        data: {
+          repository: {
+            stargazers: {
+              edges: [
+                {
+                  starredAt: new Date().toISOString(),
+                  node: {
+                    login: "principal",
+                    avatarUrl: "https://avatars.githubusercontent.com/u/10",
+                    url: "https://github.com/principal",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      });
+    }
+    if (path === "/users/principal") {
+      appCalls += 1;
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json({
+        login: "principal",
+        avatar_url: "https://avatars.githubusercontent.com/u/10",
+        html_url: "https://github.com/principal",
+        type: "User",
+        name: "Principal Engineer",
+        company: "GitHub",
+        bio: "Principal software engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://principal.dev",
+        twitter_username: "principal",
+        followers: 2500,
+        following: 120,
+        public_repos: 80,
+        public_gists: 9,
+        created_at: "2012-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/users/principal/orgs") {
+      appCalls += 1;
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json([
+        {
+          login: "github",
+          avatar_url: "https://avatars.githubusercontent.com/u/9919",
+          description: "How people build software",
+        },
+      ]);
+    }
+    if (path === "/users/principal/repos") {
+      appCalls += 1;
+      assert.equal(authorization, "Bearer installation-token");
+      return Response.json([
+        {
+          full_name: "principal/release-tools",
+          html_url: "https://github.com/principal/release-tools",
+          description: "Release tooling",
+          language: "TypeScript",
+          stargazers_count: 350,
+          forks_count: 24,
+          fork: false,
+          archived: false,
+          topics: ["release", "developer-tools"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience/backfill", {
+        method: "POST",
+        headers: { cookie: `rd_session=${authCookie}` },
+      }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      fullName: string;
+      ranges: Array<{ range: AudienceRange; state: string; users: number }>;
+      quota: { source: string; account: string | null };
+    };
+    assert.equal(body.fullName, "acme/releasebar");
+    assert.deepEqual(
+      body.ranges.map((range) => `${range.range}:${range.state}:${range.users}`),
+      ["week:rebuilt:1", "month:rebuilt:1"],
+    );
+    assert.deepEqual(body.quota, { source: "app", account: "acme" });
+    assert.ok(appCalls > 0);
+
+    const cached = await worker.fetch(
+      new Request("https://release.bar/api/repos/acme/releasebar/audience?range=week"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    const audience = (await cached.json()) as RepoAudiencePayload;
+    assert.equal(audience.cache.quota?.source, "app");
+    assert.equal(audience.users[0]?.factors.length, 7);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker builds bounded trust profiles for people pages", async () => {
+  const originalFetch = globalThis.fetch;
+  const paths: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    if (url.pathname === "/users/principal") {
+      return Response.json({
+        login: "principal",
+        avatar_url: "https://avatars.githubusercontent.com/u/10",
+        html_url: "https://github.com/principal",
+        type: "User",
+        name: "Principal Engineer",
+        company: "GitHub",
+        bio: "Principal software engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://principal.dev",
+        twitter_username: "principal",
+        followers: 2500,
+        following: 120,
+        public_repos: 80,
+        public_gists: 9,
+        created_at: "2012-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (url.pathname === "/users/principal/orgs") {
+      return Response.json([
+        {
+          login: "github",
+          avatar_url: "https://avatars.githubusercontent.com/u/9919",
+          description: "How people build software",
+        },
+      ]);
+    }
+    if (url.pathname === "/users/principal/repos") {
+      return Response.json([
+        {
+          full_name: "principal/release-tools",
+          html_url: "https://github.com/principal/release-tools",
+          description: "Release tooling",
+          language: "TypeScript",
+          stargazers_count: 120,
+          forks_count: 12,
+          fork: false,
+          archived: false,
+          topics: ["release", "developer-tools"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          full_name: "principal/trust-map",
+          html_url: "https://github.com/principal/trust-map",
+          description: "Trust signals",
+          language: "TypeScript",
+          stargazers_count: 10,
+          forks_count: 2,
+          fork: false,
+          archived: false,
+          topics: ["trust", "developer-tools"],
+          pushed_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = {
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/users/principal/trust"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as TrustProfilePayload;
+    assert.deepEqual(paths, [
+      "/users/principal",
+      "/users/principal/orgs",
+      "/users/principal/repos",
+    ]);
+    assert.equal(body.login, "principal");
+    assert.equal(body.type, "user");
+    assert.equal(body.profileKind, "user_trust");
+    assert.equal(body.scoreLabel, "trust score");
+    assert.equal(body.tier, "high");
+    assert.ok((body.accountAgeDays ?? 0) > 3650);
+    assert.ok(body.dimensions.trust >= 80);
+    assert.equal(body.stats.totalStars, 130);
+    assert.equal(body.stats.activeRepositories, 2);
+    assert.equal(body.stats.languages[0]?.name, "typescript");
+    assert.equal(body.stats.topics[0]?.name, "developer-tools");
+    assert.equal(body.orgs[0]?.login, "github");
+    assert.equal(body.topRepositories[0]?.fullName, "principal/release-tools");
+    assert.equal(body.factors.find((factor) => factor.key === "age")?.label, "account age");
+    assert.match(
+      body.factors.find((factor) => factor.key === "builder")?.detail ?? "",
+      /recent repos scanned/,
+    );
+    assert.match(body.reasons.join(" "), /notable org: github/);
+
+    const cached = await worker.fetch(
+      new Request("https://release.bar/api/users/principal/trust"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(cached.status, 200);
+    assert.deepEqual(paths, [
+      "/users/principal",
+      "/users/principal/orgs",
+      "/users/principal/repos",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker uses registered app quota for anonymous trust profiles", async () => {
+  const cache = kvStore({
+    "auth:installation:v1:principal": JSON.stringify({
+      id: 42,
+      accountLogin: "principal",
+      accountType: "user",
+      accountUrl: "https://github.com/principal",
+      avatarUrl: "https://avatars.githubusercontent.com/u/10",
+      repositorySelection: "all",
+      repositories: [],
+      updatedAt: new Date().toISOString(),
+    }),
+    "auth:installation-token:42": "installation-token",
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = new Headers(init?.headers).get("authorization");
+    assert.equal(authorization, "Bearer installation-token");
+    if (url.pathname === "/users/principal") {
+      return Response.json({
+        login: "principal",
+        avatar_url: "https://avatars.githubusercontent.com/u/10",
+        html_url: "https://github.com/principal",
+        type: "User",
+        name: "Principal Engineer",
+        company: "GitHub",
+        bio: "Principal software engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://principal.dev",
+        twitter_username: "principal",
+        followers: 2500,
+        following: 120,
+        public_repos: 80,
+        public_gists: 9,
+        created_at: "2012-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (url.pathname === "/users/principal/orgs") {
+      return Response.json([]);
+    }
+    if (url.pathname === "/users/principal/repos") {
+      return Response.json([]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/users/principal/trust"),
+      {
+        DASHBOARD_CACHE: cache,
+        GITHUB_APP_ID: "123",
+        GITHUB_APP_PRIVATE_KEY: "unused",
+        GITHUB_TOKEN: "shared-token",
+      },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as TrustProfilePayload;
+    assert.equal(body.cache.quota?.source, "app");
+    assert.equal(body.cache.quota?.account, "principal");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker returns org signal profiles for organization accounts", async () => {
+  const originalFetch = globalThis.fetch;
+  const paths: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    if (url.pathname === "/users/openclaw") {
+      return Response.json({
+        login: "openclaw",
+        avatar_url: "https://avatars.githubusercontent.com/u/20",
+        html_url: "https://github.com/openclaw",
+        type: "Organization",
+        name: "OpenClaw",
+        company: null,
+        bio: "Open source agent tooling",
+        location: "Internet",
+        blog: "https://openclaw.dev",
+        twitter_username: null,
+        followers: 1200,
+        following: 0,
+        public_repos: 42,
+        public_gists: 0,
+        created_at: "2018-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (url.pathname === "/orgs/openclaw/repos") {
+      assert.equal(url.searchParams.get("type"), "public");
+      return Response.json([
+        {
+          full_name: "openclaw/openclaw",
+          html_url: "https://github.com/openclaw/openclaw",
+          description: "Agent runtime",
+          language: "TypeScript",
+          stargazers_count: 900,
+          forks_count: 80,
+          private: false,
+          visibility: "public",
+          fork: false,
+          archived: false,
+          topics: ["agents", "developer-tools"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          full_name: "openclaw/private-signals",
+          html_url: "https://github.com/openclaw/private-signals",
+          description: "Should never leak",
+          language: "TypeScript",
+          stargazers_count: 9999,
+          forks_count: 0,
+          private: true,
+          visibility: "private",
+          fork: false,
+          archived: false,
+          topics: ["private"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = {
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/users/openclaw/trust"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as TrustProfilePayload;
+    assert.deepEqual(paths, ["/users/openclaw", "/orgs/openclaw/repos"]);
+    assert.equal(body.type, "org");
+    assert.equal(body.profileKind, "org_signal");
+    assert.equal(body.scoreLabel, "org signal");
+    assert.equal(body.stats.totalStars, 900);
+    assert.deepEqual(
+      body.topRepositories.map((repo) => repo.fullName),
+      ["openclaw/openclaw"],
+    );
+    assert.equal(body.orgs.length, 0);
+    assert.ok(body.reasons.includes("organization account"));
+    assert.equal(
+      body.factors.find((factor) => factor.key === "orgs"),
+      undefined,
+    );
+    assert.equal(
+      body.factors.find((factor) => factor.key === "builder")?.label,
+      "repository footprint",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker refreshes stale trust profiles in the background", async () => {
+  const generatedAt = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+  const staleProfile: TrustProfilePayload = {
+    login: "principal",
+    type: "user",
+    profileKind: "user_trust",
+    scoreLabel: "trust score",
+    avatarUrl: "https://avatars.githubusercontent.com/u/10",
+    url: "https://github.com/principal",
+    name: "Old Principal",
+    company: null,
+    bio: null,
+    location: null,
+    blog: null,
+    twitterUsername: null,
+    followers: 1,
+    following: 0,
+    publicRepos: 1,
+    publicGists: 0,
+    accountCreatedAt: "2020-01-01T00:00:00Z",
+    accountUpdatedAt: "2026-05-16T12:00:00Z",
+    accountAgeDays: 1000,
+    score: 10,
+    tier: "low",
+    reasons: [],
+    dimensions: { trust: 0, influence: 0, builder: 0, recency: 0, risk: 100 },
+    factors: [],
+    orgs: [],
+    topRepositories: [],
+    stats: {
+      totalStars: 0,
+      totalForks: 0,
+      recentRepositories: 0,
+      activeRepositories: 0,
+      publicOrganizations: 0,
+      languages: [],
+      topics: [],
+    },
+    generatedAt,
+    cache: {
+      state: "fresh",
+      stale: false,
+      generatedAt,
+      message: "bounded public GitHub profile signals",
+    },
+  };
+  const cache = kvStore({
+    "trust-profile:v4:principal": JSON.stringify(staleProfile),
+  });
+  const queued: Promise<unknown>[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/users/principal") {
+      return Response.json({
+        login: "principal",
+        avatar_url: "https://avatars.githubusercontent.com/u/10",
+        html_url: "https://github.com/principal",
+        type: "User",
+        name: "New Principal",
+        company: "GitHub",
+        bio: "Principal software engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://principal.dev",
+        twitter_username: "principal",
+        followers: 2500,
+        following: 120,
+        public_repos: 80,
+        public_gists: 9,
+        created_at: "2012-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (url.pathname === "/users/principal/orgs") {
+      return Response.json([
+        {
+          login: "github",
+          avatar_url: "https://avatars.githubusercontent.com/u/9919",
+          description: "How people build software",
+        },
+      ]);
+    }
+    if (url.pathname === "/users/principal/repos") {
+      return Response.json([
+        {
+          full_name: "principal/release-tools",
+          html_url: "https://github.com/principal/release-tools",
+          description: "Release tooling",
+          language: "TypeScript",
+          stargazers_count: 120,
+          forks_count: 12,
+          fork: false,
+          archived: false,
+          topics: ["release", "developer-tools"],
+          pushed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/users/principal/trust"),
+      {
+        DASHBOARD_CACHE: cache,
+        GITHUB_TOKEN: "shared-token",
+      },
+      { waitUntil: (promise) => queued.push(promise) },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as TrustProfilePayload;
+    assert.equal(body.cache.state, "stale");
+    assert.equal(body.cache.message, "refreshing trust profile");
+    assert.equal(body.name, "Old Principal");
+    assert.equal(queued.length, 1);
+    await Promise.all(queued);
+    const refreshed = JSON.parse(
+      (await cache.get("trust-profile:v4:principal")) ?? "{}",
+    ) as TrustProfilePayload;
+    assert.equal(refreshed.name, "New Principal");
+    assert.equal(refreshed.cache.state, "fresh");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3903,6 +5179,157 @@ test("worker surfaces mixed-account dashboards as shared-quota", async () => {
   }
 });
 
+test("worker keeps signed-in mixed-account dashboards on shared release scans", async () => {
+  const sessionId = "session-mixed-dashboard";
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const authCookie = await signedJson("test-secret", { id: sessionId, exp });
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore({
+      [`auth:session:${sessionId}`]: JSON.stringify({
+        user: {
+          id: 1,
+          login: "octocat",
+          name: null,
+          avatarUrl: "https://avatars.githubusercontent.com/u/1",
+          url: "https://github.com/octocat",
+        },
+        accessToken: "user-token",
+        iat: exp - 600,
+        exp,
+      }),
+    }),
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: "private-key",
+    GITHUB_TOKEN: "shared-token",
+  };
+  const graphqlIncludeReleases: boolean[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/user/installations") {
+      assert.equal(authorization, "Bearer user-token");
+      return Response.json({ installations: [] });
+    }
+    if (url.pathname === "/users/openclaw") {
+      assert.equal(authorization, "Bearer shared-token");
+      return Response.json({ login: "openclaw", type: "Organization" });
+    }
+    if (url.pathname === "/users/steipete") {
+      assert.equal(authorization, "Bearer shared-token");
+      return Response.json({ login: "steipete", type: "User" });
+    }
+    if (url.pathname === "/graphql") {
+      assert.equal(authorization, "Bearer shared-token");
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        variables?: { includeReleases?: boolean };
+      };
+      graphqlIncludeReleases.push(Boolean(body.variables?.includeReleases));
+      return Response.json(
+        {
+          data: {
+            repositoryOwner: {
+              __typename: "User",
+              repositories: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+        {
+          headers: {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "4996",
+            "x-ratelimit-reset": String(Math.floor(Date.parse("2026-05-15T13:00:00Z") / 1000)),
+            "x-ratelimit-resource": "graphql",
+          },
+        },
+      );
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/openclaw?owners=steipete", {
+        headers: { cookie: `rd_session=${authCookie}` },
+      }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as DashboardPayload;
+    assert.deepEqual(graphqlIncludeReleases, [true, true]);
+    assert.equal(body.cache?.quota?.source, "shared");
+    assert.equal(body.cache?.quota?.remaining, 4996);
+    assert.doesNotMatch(body.cache?.message ?? "", /release scan skipped/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker keeps unsynced app-configured owner dashboards metadata-only", async () => {
+  const env = {
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: "private-key",
+  };
+  const fetchedPaths: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    fetchedPaths.push(url.pathname);
+    if (url.pathname === "/users/owner") {
+      return Response.json({
+        login: "owner",
+        type: "User",
+        avatar_url: "https://avatars.githubusercontent.com/u/1",
+        html_url: "https://github.com/owner",
+      });
+    }
+    if (url.pathname === "/users/owner/repos") {
+      return Response.json([
+        {
+          owner: { login: "owner" },
+          name: "repo",
+          full_name: "owner/repo",
+          description: null,
+          html_url: "https://github.com/owner/repo",
+          default_branch: "main",
+          language: "TypeScript",
+          topics: ["releasebar"],
+          stargazers_count: 10,
+          forks_count: 1,
+          open_issues_count: 2,
+          archived: false,
+          pushed_at: "2026-01-02T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+          fork: false,
+          private: false,
+        },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  try {
+    const response = await worker.fetch(new Request("https://release.bar/api/owner"), env, {
+      waitUntil: () => undefined,
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as DashboardPayload;
+    assert.deepEqual(fetchedPaths, ["/users/owner", "/users/owner/repos"]);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(response.headers.get("vary"), "cookie");
+    assert.equal(body.projects[0]?.version, "repo search");
+    assert.equal(body.projects[0]?.commitsSinceRelease, null);
+    assert.match(body.cache?.message ?? "", /release scan skipped/);
+    assert.equal(await env.DASHBOARD_CACHE.get("hot:index:v3"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("worker uses GitHub App installation token for cold owner dashboards", async () => {
   const { privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
@@ -4555,7 +5982,7 @@ test("cache keys include owner, schema, and visibility flags", () => {
       includeUnreleased: true,
       schemaVersion: 5,
     }),
-    "dashboard:v5:openclaw:forks-noarchived-unreleased",
+    "dashboard:v5:openclaw:forks-noarchived-unreleased-release",
   );
   assert.equal(
     dashboardCacheKey({
@@ -4564,7 +5991,15 @@ test("cache keys include owner, schema, and visibility flags", () => {
       repos: ["Steipete/Oracle"],
       schemaVersion: 5,
     }),
-    "dashboard:v5:openclaw:noforks-noarchived-released:sources-2dgec2fqc87xi",
+    "dashboard:v5:openclaw:noforks-noarchived-released-release:sources-2dgec2fqc87xi",
+  );
+  assert.equal(
+    dashboardCacheKey({
+      owner: "openclaw",
+      includeReleaseData: false,
+      schemaVersion: 5,
+    }),
+    "dashboard:v5:openclaw:noforks-noarchived-released-metadata",
   );
   assert.equal(
     dashboardCacheKey({
@@ -5636,6 +7071,88 @@ test("dashboard repo scan cap stops giant owners after recent repos", async () =
   assert.equal(payload.totals.repos, 2);
   assert.equal(payload.cache?.capped, true);
   assert.match(payload.cache?.message ?? "", /scanned 2 recently pushed repos/);
+});
+
+test("dashboard metadata-only mode skips release hydration", async () => {
+  const repo = (name: string) => ({
+    owner: { login: "owner" },
+    name,
+    full_name: `owner/${name}`,
+    description: null,
+    html_url: `https://github.com/owner/${name}`,
+    default_branch: "main",
+    language: null,
+    stargazers_count: 0,
+    forks_count: 0,
+    open_issues_count: 0,
+    archived: false,
+    pushed_at: "2026-01-02T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+    fork: false,
+    private: false,
+  });
+  const unexpectedHydrationFetches: string[] = [];
+
+  const payload = await buildDashboard({
+    title: "ReleaseBar",
+    subtitle: "test",
+    canonicalDomain: "example.com",
+    owners: [{ type: "user", login: "owner" }],
+    includeForks: false,
+    includeArchived: false,
+    includeUnreleased: true,
+    includeReleaseData: false,
+    repoLimit: 2,
+    repoScanLimit: 2,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/users/owner/repos") {
+        return Response.json([repo("one"), repo("two"), repo("three")]);
+      }
+      unexpectedHydrationFetches.push(path);
+      return Response.json([]);
+    },
+  });
+
+  assert.deepEqual(unexpectedHydrationFetches, []);
+  assert.deepEqual(
+    payload.projects.map((project) => project.name),
+    ["one", "two"],
+  );
+  assert.deepEqual(
+    payload.projects.map((project) => project.version),
+    ["repo search", "repo search"],
+  );
+  assert.equal(payload.projects[0]?.commitsSinceRelease, null);
+  assert.match(payload.cache?.message ?? "", /release scan skipped/);
+});
+
+test("dashboard metadata-only released-only mode keeps released-only semantics", async () => {
+  const fetchedPaths: string[] = [];
+
+  const payload = await buildDashboard({
+    title: "ReleaseBar",
+    subtitle: "test",
+    canonicalDomain: "example.com",
+    owners: [{ type: "user", login: "owner" }],
+    includeForks: false,
+    includeArchived: false,
+    includeUnreleased: false,
+    includeReleaseData: false,
+    repoLimit: 2,
+    repoScanLimit: 2,
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      fetchedPaths.push(path);
+      return Response.json([]);
+    },
+  });
+
+  assert.deepEqual(fetchedPaths, []);
+  assert.deepEqual(payload.projects, []);
+  assert.equal(payload.totals.repos, 0);
+  assert.equal(payload.totals.unreleased, 0);
+  assert.match(payload.cache?.message ?? "", /release scan skipped/);
 });
 
 test("dashboard repo scan cap marks full page boundary truncation as capped", async () => {

@@ -599,7 +599,11 @@
   }
 
   function openOwner(owner: string): void {
-    location.assign(`/${encodeURIComponent(owner.replace(/^@/, ""))}`);
+    location.assign(ownerDashboardPath(owner));
+  }
+
+  function openSignedInUserDashboard(): void {
+    if (auth?.user) openOwner(auth.user.login);
   }
 
   function toggleSet(set: Set<string>, key: string, visible: boolean): Set<string> {
@@ -1707,6 +1711,19 @@
       keywords: ["owner", "dashboard", owner],
       onRun: () => openOwner(owner),
     }));
+    const authLogin = authPayload?.user?.login ?? null;
+    const accountDashboardCommands: CommandAction[] = authLogin
+      ? [
+          {
+            actionId: "account:dashboard",
+            title: "Open my dashboard",
+            subTitle: `@${authLogin}`,
+            group: "Account",
+            keywords: ["me", "account", "dashboard", authLogin],
+            onRun: () => openOwner(authLogin),
+          },
+        ]
+      : [];
 
     return [
       ...typedCommands,
@@ -1804,6 +1821,7 @@
         : []),
       ...(authPayload?.user
         ? [
+            ...accountDashboardCommands,
             ...(authPayload.installNeeded
               ? [
                   {
@@ -2018,6 +2036,9 @@
             <span class="account-caret" aria-hidden="true"></span>
           </DropdownMenu.Trigger>
           <DropdownMenu.Content class="account-dropdown" align="end" sideOffset={8} loop>
+            <DropdownMenu.Item class="menu-action" onSelect={openSignedInUserDashboard}>
+              My Dashboard
+            </DropdownMenu.Item>
             {#if !repoRoute}
               <DropdownMenu.Item class="menu-action" onSelect={() => (settingsOpen = !settingsOpen)}>
                 Settings

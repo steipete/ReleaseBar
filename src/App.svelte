@@ -34,21 +34,25 @@
     repoDetailPath,
     repoFromPath,
     validRepoSlug,
-    workersDevApiOrigin,
+    fallbackApiOrigin,
     type DiscoverPeriod,
   } from "./routing.js";
   import type {
     ApiQuota,
     ActivityRange,
+    AudienceRange,
     AuthPayload,
     DashboardPayload,
     Owner,
     OwnerActivityPayload,
     Project,
+    RepoAudienceBackfillPayload,
+    RepoAudiencePayload,
     RepoActivityRange,
     RepoDetailActivityPayload,
     RepoDetailPayload,
     RepoDetailReleaseSummary,
+    TrustProfilePayload,
   } from "./types.js";
 
   const repoRoute = repoFromPath(location.pathname);
@@ -69,6 +73,8 @@
   }
 
   const embedded = initialPageData();
+  const initialOwnerTab =
+    new URLSearchParams(location.search).get("tab") === "trust" ? "trust" : "overview";
   const storedDevMode = localStorage.getItem("releasedeck:dev-mode") === "true";
   const storedTheme = localStorage.getItem("releasedeck:theme");
   let theme: "dark" | "light" = storedTheme === "light" ? "light" : "dark";
@@ -120,6 +126,18 @@
   let repoActivity: RepoDetailActivityPayload | null = null;
   let repoActivityLoading = false;
   let repoActivityError = "";
+  let trustProfile: TrustProfilePayload | null = null;
+  let trustProfileLoading = false;
+  let trustProfileError = "";
+  let audienceRange: AudienceRange = "month";
+  let audienceQuery = "";
+  let audience: RepoAudiencePayload | null = null;
+  let audienceLoading = false;
+  let audienceError = "";
+  let audienceBackfillLoading = false;
+  let audienceBackfillMessage = "";
+  let audienceRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let ownerTab: "overview" | "trust" = initialOwnerTab;
 
   const numberFormat = new Intl.NumberFormat("en", { notation: "compact" });
   const dateFormat = new Intl.DateTimeFormat("en", {
@@ -142,6 +160,10 @@
   const discoverLanguages = ["TypeScript", "Python", "Rust", "Go", "Swift"];
   const activityRanges: Array<{ value: ActivityRange; label: string }> = [
     { value: "day", label: "day" },
+    { value: "week", label: "week" },
+    { value: "month", label: "month" },
+  ];
+  const audienceRanges: Array<{ value: AudienceRange; label: string }> = [
     { value: "week", label: "week" },
     { value: "month", label: "month" },
   ];
@@ -250,6 +272,8 @@
   $: workTrend = repoDetail?.workTrend ?? null;
   $: showOwnerActivity =
     !repoRoute && !initialRoute.isDefault && Boolean(initialRoute.owner) && heroExtraCount === 0;
+  $: showTrustProfile = showOwnerActivity;
+  $: filteredAudienceUsers = audience ? audienceUsersMatching(audience, audienceQuery) : [];
 
   function ownerLabel(payload: DashboardPayload): string {
     if (initialRoute.isDefault) {
@@ -275,10 +299,6 @@
 
   function ownerAvatarUrl(owner: Owner): string {
     return owner.avatarUrl ?? `https://github.com/${encodeURIComponent(owner.login)}.png?size=160`;
-  }
-
-  function ownerGitHubUrl(owner: Owner): string {
-    return owner.url ?? `https://github.com/${encodeURIComponent(owner.login)}`;
   }
 
   function projectOwnerAvatarUrl(project: Project): string {
@@ -859,6 +879,23 @@
     }, delay);
   }
 
+  function scheduleAudienceRefresh(attempt: number): void {
+    if (!repoRoute) return;
+    if (audienceRefreshTimer !== null) {
+      globalThis.clearTimeout(audienceRefreshTimer);
+    }
+    if (attempt >= 8) return;
+    const delay = attempt < 3 ? 5000 : 15000;
+    audienceRefreshTimer = globalThis.setTimeout(() => {
+      audienceRefreshTimer = null;
+      if (document.hidden) {
+        scheduleAudienceRefresh(attempt);
+        return;
+      }
+      void loadRepoAudience(attempt + 1).catch(() => undefined);
+    }, delay);
+  }
+
   function scheduleRepoActivityRefresh(attempt: number): void {
     if (!repoRoute || repoSummaryRange === "release") return;
     if (repoActivityRefreshTimer !== null) {
@@ -883,9 +920,64 @@
     url.searchParams.set("range", activityRange);
     const urls = [url.toString()];
     if (initialRoute.fallbackApiPath) {
-      const fallback = new URL(path, workersDevApiOrigin);
+      const fallback = new URL(path, fallbackApiOrigin());
       fallback.searchParams.set("range", activityRange);
       urls.push(fallback.toString());
+    }
+    return urls;
+  }
+
+  function trustProfileApiPaths(): string[] {
+    if (!initialRoute.owner) return [];
+    const path = `/api/users/${encodeURIComponent(initialRoute.owner)}/trust`;
+    const urls = [new URL(path, location.origin).toString()];
+    if (initialRoute.fallbackApiPath) {
+      urls.push(new URL(path, fallbackApiOrigin()).toString());
+    }
+    return urls;
+  }
+
+  function audienceApiPath(apiPath: string): string {
+    const url = new URL(apiPath, location.origin);
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/audience`;
+    url.searchParams.set("range", audienceRange);
+    return url.toString();
+  }
+
+  function audienceApiPaths(): string[] {
+    if (!repoRoute) return [];
+    const urls = [audienceApiPath(repoRoute.apiPath)];
+    if (repoRoute.fallbackApiPath) {
+      urls.push(audienceApiPath(repoRoute.fallbackApiPath));
+    }
+    return urls;
+  }
+
+  function isRepoAudiencePayload(body: unknown): body is RepoAudiencePayload {
+    if (!body || typeof body !== "object") return false;
+    const payload = body as {
+      cache?: { state?: unknown };
+      fullName?: unknown;
+      users?: unknown;
+    };
+    return (
+      typeof payload.fullName === "string" &&
+      Array.isArray(payload.users) &&
+      typeof payload.cache?.state === "string"
+    );
+  }
+
+  function audienceBackfillApiPath(apiPath: string): string {
+    const url = new URL(apiPath, location.origin);
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/audience/backfill`;
+    return url.toString();
+  }
+
+  function audienceBackfillApiPaths(): string[] {
+    if (!repoRoute) return [];
+    const urls = [audienceBackfillApiPath(repoRoute.apiPath)];
+    if (repoRoute.fallbackApiPath) {
+      urls.push(audienceBackfillApiPath(repoRoute.fallbackApiPath));
     }
     return urls;
   }
@@ -899,10 +991,7 @@
     };
     const urls = [appendActivity(repoRoute.apiPath)];
     if (repoRoute.fallbackApiPath) {
-      const fallback = new URL(
-        `${repoRoute.fallbackApiPath.replace(/\/$/, "")}/activity`,
-        workersDevApiOrigin,
-      );
+      const fallback = new URL(`${repoRoute.fallbackApiPath.replace(/\/$/, "")}/activity`, fallbackApiOrigin());
       fallback.searchParams.set("range", repoSummaryRange);
       urls.push(fallback.toString());
     }
@@ -943,6 +1032,104 @@
     }
   }
 
+  async function loadTrustProfile(): Promise<void> {
+    if (!showTrustProfile) return;
+    const paths = trustProfileApiPaths();
+    if (paths.length === 0) return;
+    trustProfileLoading = !trustProfile;
+    trustProfileError = "";
+    try {
+      for (const path of paths) {
+        const response = await fetch(path);
+        const body = (await response.json().catch(() => null)) as
+          | TrustProfilePayload
+          | { error?: string; cache?: { message?: string } }
+          | null;
+        if (body && "score" in body) {
+          trustProfile = body;
+          trustProfileError = "";
+          return;
+        }
+        trustProfileError =
+          body && "error" in body
+            ? (body.error ?? "")
+            : body?.cache?.message || `trust profile failed: ${response.status}`;
+      }
+    } catch (error) {
+      trustProfileError = error instanceof Error ? error.message : String(error);
+    } finally {
+      trustProfileLoading = false;
+    }
+  }
+
+  async function loadRepoAudience(attempt = 0, bypassCache = false): Promise<void> {
+    if (!repoRoute) return;
+    const paths = audienceApiPaths();
+    if (paths.length === 0) return;
+    const requestedRange = audienceRange;
+    audienceLoading = attempt === 0 && !audience;
+    audienceError = "";
+    try {
+      for (const path of paths) {
+        const response = await fetchPayload(path, bypassCache || attempt > 0);
+        const body = (await response.json().catch(() => null)) as
+          | RepoAudiencePayload
+          | { error?: string; cache?: { message?: string } }
+          | null;
+        if (isRepoAudiencePayload(body)) {
+          if (requestedRange !== audienceRange) return;
+          audience = body;
+          audienceError = "";
+          if (body.cache.state === "stale" || body.cache.state === "warming") {
+            scheduleAudienceRefresh(attempt);
+          }
+          return;
+        }
+        audienceError =
+          body && "error" in body
+            ? (body.error ?? "")
+            : body?.cache?.message || `audience fetch failed: ${response.status}`;
+      }
+    } catch (error) {
+      audienceError = error instanceof Error ? error.message : String(error);
+    } finally {
+      audienceLoading = false;
+    }
+  }
+
+  async function backfillRepoAudience(): Promise<void> {
+    if (!repoRoute || audienceBackfillLoading) return;
+    const paths = audienceBackfillApiPaths();
+    if (paths.length === 0) return;
+    audienceBackfillLoading = true;
+    audienceBackfillMessage = "";
+    try {
+      for (const path of paths) {
+        const response = await fetch(path, { method: "POST", cache: "no-store" });
+        const body = (await response.json().catch(() => null)) as
+          | RepoAudienceBackfillPayload
+          | { error?: string; message?: string }
+          | null;
+        if (body && "ranges" in body) {
+          audienceBackfillMessage = body.ranges
+            .map((range) => `${range.range} ${range.state}`)
+            .join(" · ");
+          audience = null;
+          await loadRepoAudience(0, true);
+          return;
+        }
+        audienceBackfillMessage =
+          body && "error" in body
+            ? (body.error ?? "")
+            : body?.message || `backfill failed: ${response.status}`;
+      }
+    } catch (error) {
+      audienceBackfillMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      audienceBackfillLoading = false;
+    }
+  }
+
   function setActivityRange(range: ActivityRange): void {
     if (activityRange === range) return;
     activityRange = range;
@@ -953,6 +1140,18 @@
       activityRefreshTimer = null;
     }
     void loadOwnerActivity();
+  }
+
+  function setAudienceRange(range: AudienceRange): void {
+    if (audienceRange === range) return;
+    audienceRange = range;
+    audience = null;
+    audienceError = "";
+    if (audienceRefreshTimer !== null) {
+      globalThis.clearTimeout(audienceRefreshTimer);
+      audienceRefreshTimer = null;
+    }
+    void loadRepoAudience();
   }
 
   async function loadRepoActivity(attempt = 0): Promise<void> {
@@ -1009,6 +1208,143 @@
     const repoText = `${numberFormat.format(payload.totals.repositories)} repo${payload.totals.repositories === 1 ? "" : "s"}`;
     const eventText = `${numberFormat.format(payload.totals.events)} public event${payload.totals.events === 1 ? "" : "s"}`;
     return `${eventText} · ${repoText} · updated ${relativeDate(payload.generatedAt)}`;
+  }
+
+  function audienceMeta(payload: RepoAudiencePayload): string {
+    const total = `${numberFormat.format(audienceTotalStargazers(payload))} total stargazers`;
+    const scored = `${numberFormat.format(payload.totals.stargazersSampled)} scored profiles`;
+    const high = `${audienceShare(payload, payload.totals.highSignal, payload.totals.highSignalPercent)} high-signal`;
+    const quota = quotaLabel(payload.cache.quota);
+    return [total, scored, high, payload.cache.state, quota, `updated ${relativeDate(payload.generatedAt)}`]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
+  function audienceTotalStargazers(payload: RepoAudiencePayload): number {
+    return payload.totals.stargazers ?? payload.totals.stargazersSampled;
+  }
+
+  function audienceShare(payload: RepoAudiencePayload, count: number, percent: number): string {
+    const value = Number.isFinite(percent)
+      ? percent
+      : payload.totals.stargazersSampled > 0
+        ? Math.round((count / payload.totals.stargazersSampled) * 100)
+        : 0;
+    return `${numberFormat.format(value)}%`;
+  }
+
+  function audienceUsersMatching(
+    payload: RepoAudiencePayload,
+    text: string,
+  ): RepoAudiencePayload["users"] {
+    const needle = text.trim().toLowerCase();
+    if (!needle) return payload.users;
+    return payload.users.filter((user) =>
+      [
+        user.login,
+        user.name,
+        user.company,
+        user.bio,
+        user.location,
+        user.tier,
+        ...user.reasons,
+        ...(user.factors ?? []).map((factor) => `${factor.label} ${factor.detail}`),
+        ...user.orgs.map((org) => org.login),
+        ...user.topRepositories.map((repo) => repo.fullName),
+        ...user.topRepositories.map((repo) => repo.language),
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle)),
+    );
+  }
+
+  function audienceReasonText(reasons: string[]): string {
+    return reasons.length > 0 ? reasons.slice(0, 3).join(" · ") : "public profile signal";
+  }
+
+  function trustProfileAge(payload: TrustProfilePayload): string {
+    if (payload.accountAgeDays === null) return "age unknown";
+    const years = payload.accountAgeDays / 365;
+    if (years >= 1) return `${years.toFixed(years >= 10 ? 0 : 1)} years on GitHub`;
+    return `${numberFormat.format(payload.accountAgeDays)} days on GitHub`;
+  }
+
+  function trustProfileMeta(payload: TrustProfilePayload): string {
+    const quota = quotaLabel(payload.cache.quota);
+    return [
+      trustProfileAge(payload),
+      `${numberFormat.format(payload.followers)} followers`,
+      `${numberFormat.format(payload.publicRepos)} repos`,
+      quota,
+      `updated ${relativeDate(payload.generatedAt)}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
+  function ownerSignalLabel(payload: TrustProfilePayload | null = trustProfile): string {
+    if (payload) return payload.scoreLabel;
+    return ownerHero(data)?.type === "org" ? "org signal" : "trust";
+  }
+
+  function ownerSignalDescription(payload: TrustProfilePayload | null = trustProfile): string {
+    return payload?.type === "org" || (!payload && ownerHero(data)?.type === "org")
+      ? "bounded public GitHub organization signals"
+      : "bounded public GitHub trust signals";
+  }
+
+  function ownerSignalTabLabel(payload: TrustProfilePayload | null = trustProfile): string {
+    return payload?.type === "org" || (!payload && ownerHero(data)?.type === "org")
+      ? "org signal"
+      : "trust";
+  }
+
+  function trustDimensionEntries(payload: TrustProfilePayload): Array<[string, number]> {
+    if (payload.type === "org") {
+      return [
+        ["credibility", payload.dimensions.trust],
+        ["repo footprint", payload.dimensions.builder],
+        ["reach", payload.dimensions.influence],
+        ["profile safety", payload.dimensions.risk],
+      ];
+    }
+    return [
+      ["trust", payload.dimensions.trust],
+      ["build", payload.dimensions.builder],
+      ["reach", payload.dimensions.influence],
+      ["account safety", payload.dimensions.risk],
+    ];
+  }
+
+  function trustFactorEntries(payload: TrustProfilePayload): TrustProfilePayload["factors"] {
+    return (payload.factors ?? []).filter((factor) => factor.key !== "recency" || factor.value > 0).slice(0, 8);
+  }
+
+  function setOwnerTab(tab: "overview" | "trust"): void {
+    ownerTab = tab;
+    const url = new URL(location.href);
+    if (tab === "trust") {
+      url.searchParams.set("tab", "trust");
+    } else {
+      url.searchParams.delete("tab");
+    }
+    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function factorContribution(value: number): string {
+    if (value === 0) return "0.0";
+    return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+  }
+
+  function audienceInsightText(user: RepoAudiencePayload["users"][number]): string {
+    const orgs = user.orgs.slice(0, 2).map((org) => `@${org.login}`).join(", ");
+    const topRepo = user.topRepositories[0];
+    return [
+      orgs ? `orgs ${orgs}` : "",
+      topRepo ? `top repo ${topRepo.fullName} · ${numberFormat.format(topRepo.stars)} stars` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
   }
 
   function closeDashboardStream(): void {
@@ -1536,6 +1872,8 @@
     void Promise.all([
       loadAuth(),
       routeTask,
+      showTrustProfile ? loadTrustProfile() : Promise.resolve(),
+      repoRoute ? loadRepoAudience() : Promise.resolve(),
       showOwnerActivity ? loadOwnerActivity() : Promise.resolve(),
     ]).catch((error) => {
       generatedLabel = "failed";
@@ -1554,6 +1892,9 @@
     }
     if (activityRefreshTimer !== null) {
       globalThis.clearTimeout(activityRefreshTimer);
+    }
+    if (audienceRefreshTimer !== null) {
+      globalThis.clearTimeout(audienceRefreshTimer);
     }
     if (repoActivityRefreshTimer !== null) {
       globalThis.clearTimeout(repoActivityRefreshTimer);
@@ -1579,7 +1920,7 @@
       <h1>
         {#if heroOwner}
           <span class="hero-owner-title">
-            <a class="hero-owner-link" href={ownerGitHubUrl(heroOwner)} target="_blank" rel="noreferrer">
+            <a class="hero-owner-link" href={ownerDashboardPath(heroOwner.login)}>
               <img
                 class="hero-owner-avatar"
                 src={ownerAvatarUrl(heroOwner)}
@@ -1621,7 +1962,7 @@
       <p class="subtitle">
         {#if subtitleOwner}
           Release freshness for
-          <a class="subtitle-link" href={`https://github.com/${subtitleOwner}`} target="_blank" rel="noreferrer">
+          <a class="subtitle-link" href={ownerDashboardPath(subtitleOwner)}>
             @{subtitleOwner}</a
           >.
         {:else}
@@ -1630,10 +1971,10 @@
       </p>
       {#if repoRoute && repoDetail}
         <nav class="repo-actions" aria-label="Repository links">
-          <a href={repoDetail.project.url} target="_blank" rel="noreferrer">GitHub</a>
-          <a href={`${repoDetail.project.url}/releases`} target="_blank" rel="noreferrer">Releases</a>
-          <a href={repoDetail.project.issuesUrl} target="_blank" rel="noreferrer">Issues</a>
-          <a href={repoDetail.project.pullRequestsUrl} target="_blank" rel="noreferrer">PRs</a>
+          <a class="external-link" href={repoDetail.project.url} target="_blank" rel="noreferrer">GitHub</a>
+          <a class="external-link" href={`${repoDetail.project.url}/releases`} target="_blank" rel="noreferrer">Releases</a>
+          <a class="external-link" href={repoDetail.project.issuesUrl} target="_blank" rel="noreferrer">Issues</a>
+          <a class="external-link" href={repoDetail.project.pullRequestsUrl} target="_blank" rel="noreferrer">PRs</a>
         </nav>
       {/if}
     </div>
@@ -1989,13 +2330,26 @@
             </div>
             <div class="contributor-list">
               {#each repoDetail.contributors as contributor}
-                <a class="contributor-row" href={contributor.url ?? repoDetail.project.url} target="_blank" rel="noreferrer">
+                <a
+                  class="contributor-row"
+                  href={contributor.url ? ownerDashboardPath(contributor.login) : repoDetailPath(repoDetail.fullName)}
+                >
                   {#if contributor.avatarUrl}
                     <img src={contributor.avatarUrl} alt="" width="26" height="26" loading="lazy" />
                   {:else}
                     <span class="avatar-fallback" aria-hidden="true"></span>
                   {/if}
-                  <span>{contributor.login}</span>
+                  <span class="contributor-name">
+                    <span>{contributor.login}</span>
+                    {#if contributor.trustScore !== undefined}
+                      <small
+                        class={`person-score-pill tier-${contributor.trustTier ?? "low"}`}
+                        title={`trust score ${numberFormat.format(contributor.trustScore)}`}
+                      >
+                        {numberFormat.format(contributor.trustScore)}
+                      </small>
+                    {/if}
+                  </span>
                   <strong>{numberFormat.format(contributor.commits)}</strong>
                   <i style={`width: ${percent(contributor.commits, detailMaxContributorCommits)}%`}></i>
                 </a>
@@ -2017,7 +2371,7 @@
                   <span class="release-group-label">stable</span>
                   <div class="release-list">
                     {#each stableReleases as release}
-                      <a href={release.url} target="_blank" rel="noreferrer">
+                      <a class="external-link" href={release.url} target="_blank" rel="noreferrer">
                         <strong>{release.tagName}</strong>
                         <span>{shortDate(release.publishedAt)} · {relativeDate(release.publishedAt)}</span>
                       </a>
@@ -2030,7 +2384,7 @@
                   <span class="release-group-label">pre</span>
                   <div class="release-list">
                     {#each preReleases as release}
-                      <a href={release.url} target="_blank" rel="noreferrer">
+                      <a class="external-link" href={release.url} target="_blank" rel="noreferrer">
                         <strong>{release.tagName}</strong>
                         <span>{shortDate(release.publishedAt)} · {relativeDate(release.publishedAt)}</span>
                       </a>
@@ -2097,6 +2451,109 @@
             </div>
           </section>
 
+          <section class="detail-panel detail-wide audience-panel" aria-label="Recent stargazer audience">
+            <div class="panel-heading audience-heading">
+              <div>
+                <span class="panel-kicker">audience</span>
+                <h2>new stargazers</h2>
+              </div>
+              <div class="range-toggle" aria-label="Audience range">
+                {#each audienceRanges as range}
+                  <button
+                    class:active={audienceRange === range.value}
+                    type="button"
+                    aria-pressed={audienceRange === range.value}
+                    onclick={() => setAudienceRange(range.value)}
+                  >
+                    {range.label}
+                  </button>
+                {/each}
+                <button type="button" disabled={audienceBackfillLoading} onclick={backfillRepoAudience}>
+                  {audienceBackfillLoading ? "backfilling" : "backfill"}
+                </button>
+              </div>
+            </div>
+            {#if audienceBackfillMessage}
+              <p class="detail-empty audience-backfill-message">{audienceBackfillMessage}</p>
+            {/if}
+            {#if audienceLoading}
+              <p class="detail-empty">Scoring recent public stargazer profiles.</p>
+            {:else if audienceError}
+              <p class="detail-empty">{audienceError}</p>
+            {:else if audience}
+              <div class="audience-summary" aria-label={audienceMeta(audience)}>
+                <div>
+                  <span>stargazers</span>
+                  <strong>{numberFormat.format(audienceTotalStargazers(audience))}</strong>
+                </div>
+                <div>
+                  <span>high</span>
+                  <strong>{audienceShare(audience, audience.totals.highSignal, audience.totals.highSignalPercent)}</strong>
+                </div>
+                <div>
+                  <span>medium</span>
+                  <strong>{audienceShare(audience, audience.totals.mediumSignal, audience.totals.mediumSignalPercent)}</strong>
+                </div>
+                <div>
+                  <span>bots</span>
+                  <strong>{audienceShare(audience, audience.totals.bots, audience.totals.botPercent)}</strong>
+                </div>
+              </div>
+              {#if audience.users.length > 0}
+                <div class="audience-tools">
+                  <input
+                    bind:value={audienceQuery}
+                    type="search"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="find people, orgs, companies, repos"
+                    aria-label="Find stargazers"
+                  />
+                  <span>
+                    {numberFormat.format(filteredAudienceUsers.length)} / {numberFormat.format(audience.users.length)}
+                  </span>
+                </div>
+                <div class="audience-list">
+                  {#each filteredAudienceUsers as user}
+                    <a class="audience-row" href={ownerDashboardPath(user.login)}>
+                      <img src={user.avatarUrl} alt="" width="34" height="34" loading="lazy" />
+                      <span class="audience-user">
+                        <strong>
+                          <span>{user.login}</span>
+                          {#if user.trustScore !== undefined}
+                            <small
+                              class={`person-score-pill tier-${user.trustTier ?? "low"}`}
+                              title={`trust score ${numberFormat.format(user.trustScore)}`}
+                            >
+                              {numberFormat.format(user.trustScore)}
+                            </small>
+                          {/if}
+                        </strong>
+                        <small>{user.name || user.company || audienceReasonText(user.reasons)}</small>
+                        {#if audienceInsightText(user)}
+                          <small>{audienceInsightText(user)}</small>
+                        {/if}
+                      </span>
+                      <span class="audience-score">
+                        <span class={`audience-tier tier-${user.tier}`}>{user.tier}</span>
+                        <strong>{numberFormat.format(user.score)}</strong>
+                        <small>{numberFormat.format(user.followers)} followers · {numberFormat.format(user.publicRepos)} repos</small>
+                      </span>
+                    </a>
+                  {/each}
+                </div>
+                <small class="audience-note">{audienceMeta(audience)} · public stargazer profile signals only</small>
+                {#if filteredAudienceUsers.length === 0}
+                  <p class="detail-empty">No stargazers match that search.</p>
+                {/if}
+              {:else}
+                <p class="detail-empty">No recent public stargazers in this range.</p>
+              {/if}
+            {:else}
+              <p class="detail-empty">Audience signals are warming.</p>
+            {/if}
+          </section>
+
           {#if showCodeChurn(repoDetail)}
             <section class="detail-panel detail-tail">
               <div class="panel-heading">
@@ -2125,7 +2582,161 @@
       {/if}
     </section>
   {:else}
-  {#if showOwnerActivity}
+  {#if showTrustProfile}
+    <nav class="owner-tabs" aria-label="Owner page sections">
+      <button
+        class:active={ownerTab === "overview"}
+        type="button"
+        aria-pressed={ownerTab === "overview"}
+        onclick={() => setOwnerTab("overview")}
+      >
+        overview
+      </button>
+      <button
+        class:active={ownerTab === "trust"}
+        type="button"
+        aria-pressed={ownerTab === "trust"}
+        onclick={() => setOwnerTab("trust")}
+      >
+        {ownerSignalTabLabel()}
+      </button>
+    </nav>
+  {/if}
+
+  {#if showTrustProfile && ownerTab === "overview"}
+    <section class="trust-snapshot" aria-label={`${ownerSignalLabel()} summary`}>
+      {#if trustProfileLoading}
+        <span class="panel-kicker">{ownerSignalTabLabel()}</span>
+        <strong>loading</strong>
+        <small>{ownerSignalDescription()}</small>
+      {:else if trustProfileError}
+        <span class="panel-kicker">{ownerSignalTabLabel()}</span>
+        <strong>unavailable</strong>
+        <small>{trustProfileError}</small>
+      {:else if trustProfile}
+        <div class="trust-snapshot-score">
+          <span class="panel-kicker">{ownerSignalLabel(trustProfile)}</span>
+          <strong>{trustProfile.score}</strong>
+          <small class={`audience-tier tier-${trustProfile.tier}`}>{trustProfile.tier}</small>
+        </div>
+        <div>
+          <span>GitHub age</span>
+          <strong>{trustProfileAge(trustProfile)}</strong>
+        </div>
+        <div>
+          <span>reach</span>
+          <strong>{numberFormat.format(trustProfile.followers)} followers</strong>
+        </div>
+        <div>
+          <span>{trustProfile.type === "org" ? "footprint" : "builder"}</span>
+          <strong>{numberFormat.format(trustProfile.stats.activeRepositories)} active repos</strong>
+        </div>
+        <p>{audienceReasonText(trustProfile.reasons)}</p>
+        <button type="button" onclick={() => setOwnerTab("trust")}>view factors</button>
+      {:else}
+        <span class="panel-kicker">{ownerSignalTabLabel()}</span>
+        <strong>pending</strong>
+        <small>{ownerSignalDescription()} will appear here.</small>
+      {/if}
+    </section>
+  {/if}
+
+  {#if showTrustProfile && ownerTab === "trust"}
+    <section class="trust-panel" aria-label={`GitHub ${ownerSignalLabel()} profile`}>
+      <div class="panel-heading">
+        <div>
+          <span class="panel-kicker">{ownerSignalTabLabel()}</span>
+          <h2>{trustProfile ? `${trustProfile.score}` : "loading"}</h2>
+        </div>
+        {#if trustProfile}
+          <span class={`audience-tier tier-${trustProfile.tier}`}>{trustProfile.tier}</span>
+        {/if}
+      </div>
+
+      {#if trustProfileLoading}
+        <p class="activity-text">Loading {ownerSignalDescription()}.</p>
+      {:else if trustProfileError}
+        <p class="activity-text muted">{trustProfileError}</p>
+      {:else if trustProfile}
+        <div class="trust-summary" aria-label={trustProfileMeta(trustProfile)}>
+          <div>
+            <span>GitHub age</span>
+            <strong>{trustProfileAge(trustProfile)}</strong>
+          </div>
+          <div>
+            <span>public reach</span>
+            <strong>{numberFormat.format(trustProfile.followers)} followers</strong>
+          </div>
+          <div>
+            <span>{trustProfile.type === "org" ? "repo footprint" : "builder proof"}</span>
+            <strong>{numberFormat.format(trustProfile.stats.activeRepositories)} active repos</strong>
+          </div>
+          <div>
+            <span>repo stars</span>
+            <strong>{numberFormat.format(trustProfile.stats.totalStars)}</strong>
+          </div>
+        </div>
+
+        <div class="trust-dimensions" aria-label={`${ownerSignalLabel(trustProfile)} dimensions`}>
+          {#each trustDimensionEntries(trustProfile) as [label, value]}
+            <span>
+              <small>{label}</small>
+              <strong>{value}</strong>
+            </span>
+          {/each}
+        </div>
+
+        {#if trustFactorEntries(trustProfile).length > 0}
+          <div class="trust-factors" aria-label={`${ownerSignalLabel(trustProfile)} factors`}>
+            {#each trustFactorEntries(trustProfile) as factor}
+              <div class:negative={factor.sentiment === "negative"}>
+                <span>
+                  <strong>{factor.label}</strong>
+                  <small>{factor.detail}</small>
+                </span>
+                <span class="factor-value">{factor.value}/{factor.maxValue}</span>
+                <b style={`--factor-width: ${Math.min(100, Math.round((factor.value / Math.max(1, factor.maxValue)) * 100))}%`}></b>
+                <em class="factor-impact">{factorContribution(factor.weightedValue)}</em>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <p class="trust-reasons">{audienceReasonText(trustProfile.reasons)}</p>
+
+        {#if trustProfile.topRepositories.length > 0}
+          <div class="trust-table" aria-label="Repository evidence">
+            {#each trustProfile.topRepositories as repo}
+              <a href={repoDetailPath(repo.fullName)}>
+                <span>
+                  <strong>{repo.fullName}</strong>
+                  <small>{repo.language || repo.topics.slice(0, 2).join(", ") || "public repo"}</small>
+                </span>
+                <span>{numberFormat.format(repo.stars)} stars</span>
+              </a>
+            {/each}
+          </div>
+        {/if}
+
+        <div class="trust-tags" aria-label="Profile signals">
+          {#each trustProfile.stats.languages as item}
+            <span>{item.name} × {item.count}</span>
+          {/each}
+          {#each trustProfile.stats.topics.slice(0, 4) as item}
+            <span>{item.name} × {item.count}</span>
+          {/each}
+          {#each trustProfile.orgs.slice(0, 4) as org}
+            <span>@{org.login}</span>
+          {/each}
+        </div>
+        <small class="activity-meta">{trustProfileMeta(trustProfile)} · public {trustProfile.type === "org" ? "organization" : "profile"} signals only</small>
+      {:else}
+        <p class="activity-text muted">{ownerSignalDescription()} will appear here when available.</p>
+      {/if}
+    </section>
+  {/if}
+
+  {#if showOwnerActivity && ownerTab === "overview"}
     <section class="activity-panel" aria-label="Recent public activity">
       <div class="panel-heading">
         <div>
@@ -2184,6 +2795,7 @@
     </section>
   {/if}
 
+  {#if !showTrustProfile || ownerTab === "overview"}
   <section class="console" aria-label="Project search and metrics">
     <div class="prompt">
       <span class="mark">$</span>
@@ -2421,7 +3033,7 @@
           <div class="release-cell">
             {#if isRepositorySearchProject(project)}
               <strong>repo search</strong>
-              <a class="release-version" href={project.url} target="_blank" rel="noreferrer">
+              <a class="release-version" href={repoDetailPath(project.fullName)}>
                 open repo
               </a>
               <span class:scan-pending={data?.cache?.progress?.done === false}>
@@ -2429,21 +3041,27 @@
               </span>
             {:else}
               <strong>{absoluteDate(project.releaseDate)}</strong>
-              <a
-                class="release-version"
-                href={project.releaseUrl}
-                target="_blank"
-                rel="noreferrer"
-                title={project.releaseDate ? `Open release ${project.version}` : "Open repository"}
-              >
-                {project.releaseDate ? project.version : "open repo"}
-              </a>
+              {#if project.releaseDate}
+                <a
+                  class="release-version external-link"
+                  href={project.releaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`Open release ${project.version}`}
+                >
+                  {project.version}
+                </a>
+              {:else}
+                <a class="release-version" href={repoDetailPath(project.fullName)} title="Open repo detail">
+                  open repo
+                </a>
+              {/if}
               <span>{relativeDate(project.releaseDate)}</span>
             {/if}
           </div>
           <div class="since-cell" class:muted={!project.compareUrl || project.commitsSinceRelease === null}>
             {#if project.compareUrl && project.commitsSinceRelease !== null}
-              <a href={project.compareUrl} target="_blank" rel="noreferrer">
+              <a class="external-link" href={project.compareUrl} target="_blank" rel="noreferrer">
                 {project.commitsSinceRelease}
               </a>
             {:else}
@@ -2455,16 +3073,16 @@
             <span>{project.latestCommitSha || project.defaultBranch}</span>
           </div>
           <div class="issues-cell dev-only">
-            <a href={project.issuesUrl} target="_blank" rel="noreferrer">{project.openIssues}</a>
+            <a class="external-link" href={project.issuesUrl} target="_blank" rel="noreferrer">{project.openIssues}</a>
           </div>
           <div class="prs-cell dev-only">
-            <a href={project.pullRequestsUrl} target="_blank" rel="noreferrer">
+            <a class="external-link" href={project.pullRequestsUrl} target="_blank" rel="noreferrer">
               {project.openPullRequests}
             </a>
           </div>
           <div class="ci-cell dev-only" data-ci={project.ciState}>
             {#if project.ciUrl}
-              <a href={project.ciUrl} target="_blank" rel="noreferrer">{ciLabel(project)}</a>
+              <a class="external-link" href={project.ciUrl} target="_blank" rel="noreferrer">{ciLabel(project)}</a>
             {:else}
               {ciLabel(project)}
             {/if}
@@ -2478,13 +3096,14 @@
     </div>
   </section>
   {/if}
+  {/if}
 </main>
 
 <footer class="site-footer">
   <span>A project by</span>
-  <a href="https://steipete.me" target="_blank" rel="noreferrer">Peter Steinberger</a>
+  <a class="external-link" href="https://steipete.me" target="_blank" rel="noreferrer">Peter Steinberger</a>
   <span class="footer-separator" aria-hidden="true">.</span>
-  <a href="https://github.com/steipete/ReleaseBar/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT Licensed</a>
+  <a class="external-link" href="https://github.com/steipete/ReleaseBar/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT Licensed</a>
 </footer>
 
 <CommandPalette

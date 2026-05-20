@@ -543,7 +543,6 @@ h1 {
 .activity-panel {
   display: grid;
   gap: 12px;
-  margin: -8px 0 22px;
   padding: 20px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -551,6 +550,14 @@ h1 {
     linear-gradient(90deg, rgba(156, 255, 87, 0.055), transparent 42%),
     color-mix(in srgb, var(--panel) 78%, transparent);
   box-shadow: var(--shadow);
+}
+
+.trust-panel {
+  margin: -2px 0 22px;
+}
+
+.activity-panel {
+  margin: -8px 0 22px;
 }
 
 .activity-panel .panel-heading {

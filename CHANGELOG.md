@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Matched the trust tab's content spacing to the overview tab.
 - Added a logged-in account menu and command palette shortcut for opening your own dashboard.
 - Embed cached public dashboard and repository payloads in served app shells so warm routes render without an initial loading panel.
 - Added OpenAPI/Swagger JSON endpoints for the public trust and audience APIs.

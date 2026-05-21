@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "bits-ui": "^2.18.1",
-    "svelte": "^5.55.7",
+    "svelte": "^5.55.9",
     "svelte-command-palette": "^2.0.2",
     "valibot": "^1.4.0"
   },

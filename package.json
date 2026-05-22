@@ -23,18 +23,18 @@
   },
   "dependencies": {
     "bits-ui": "^2.18.1",
-    "svelte": "^5.55.7",
+    "svelte": "^5.55.9",
     "svelte-command-palette": "^2.0.2",
     "valibot": "^1.4.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
-    "@types/node": "^25.8.0",
-    "oxfmt": "^0.49.0",
-    "oxlint": "^1.64.0",
+    "@types/node": "^25.9.1",
+    "oxfmt": "^0.51.0",
+    "oxlint": "^1.66.0",
     "svelte-check": "^4.4.8",
     "typescript": "^6.0.3",
-    "vite": "^8.0.13"
+    "vite": "^8.0.14"
   },
   "engines": {
     "node": ">=20"

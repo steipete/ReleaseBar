@@ -148,6 +148,7 @@
   let adminLoading = false;
   let adminError = "";
   let adminActionMessage = "";
+  let manualRefreshLoading = false;
 
   const numberFormat = new Intl.NumberFormat("en", { notation: "compact" });
   const dateFormat = new Intl.DateTimeFormat("en", {
@@ -225,6 +226,7 @@
     (!data && !errorMessage) ||
     (data?.cache?.state === "rebuilding" && data.projects.length === 0);
   $: dashboardUpdating = data?.cache?.state === "partial";
+  $: manualRefreshAvailable = !adminRoute && !repoRoute && !initialRoute.isDefault;
   $: ownerToggles = data
     ? [...new Set(data.projects.map((project) => project.owner.toLowerCase()))].sort()
     : [];
@@ -1655,6 +1657,56 @@
     }
   }
 
+  async function manualRefreshDashboard(): Promise<void> {
+    if (!manualRefreshAvailable || manualRefreshLoading) return;
+    manualRefreshLoading = true;
+    generatedLabel = "refreshing";
+    generatedDetail = "refreshing issue and PR counts first";
+    errorMessage = "";
+    closeDashboardStream();
+    if (dashboardRefreshTimer !== null) {
+      globalThis.clearTimeout(dashboardRefreshTimer);
+      dashboardRefreshTimer = null;
+    }
+    const read = async (apiPath: string) => {
+      const response = await fetch(apiPath, { method: "POST", cache: "no-store" });
+      const body = await readDashboardResponse(response);
+      return { response, body };
+    };
+    try {
+      let { response, body } = await read(initialRoute.apiPath);
+      if (
+        initialRoute.fallbackApiPath &&
+        (!response.ok || !body || !("projects" in body))
+      ) {
+        ({ response, body } = await read(initialRoute.fallbackApiPath));
+      }
+      if (response.ok && body && "projects" in body) {
+        data = body;
+        updateStatus();
+        if (shouldAutoRefresh(data)) {
+          if (!startDashboardStream(0)) {
+            scheduleDashboardRefresh(0);
+          }
+        }
+        return;
+      }
+      const message =
+        body && "cache" in body && body.cache?.message
+          ? body.cache.message
+          : body && "error" in body
+            ? body.error
+            : `dashboard refresh failed: ${response.status}`;
+      throw new Error(message || `dashboard refresh failed: ${response.status}`);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      generatedLabel = "refresh failed";
+      generatedDetail = errorMessage;
+    } finally {
+      manualRefreshLoading = false;
+    }
+  }
+
   async function loadRepoDetail(attempt = 0): Promise<void> {
     if (!repoRoute) return;
     const bypassCache = attempt > 0;
@@ -2220,6 +2272,23 @@
       {/if}
     </div>
     <div class="top-actions">
+      {#if manualRefreshAvailable}
+        <button
+          type="button"
+          class="refresh-toggle"
+          disabled={manualRefreshLoading}
+          onclick={manualRefreshDashboard}
+          aria-label="Refresh dashboard"
+          title="Refresh dashboard"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 0 1-15.2 6.5" />
+            <path d="M3 12A9 9 0 0 1 18.2 5.5" />
+            <path d="M18 2v4h-4" />
+            <path d="M6 22v-4h4" />
+          </svg>
+        </button>
+      {/if}
       <button
         type="button"
         class="status"

@@ -200,6 +200,8 @@ const refreshJobPrefix = `refresh:job:v1:`;
 const refreshJobIndexKey = `refresh:jobs:index:v1`;
 const refreshAuditPrefix = `refresh:audit:v2:`;
 const refreshStateKey = `refresh:state:v1`;
+const manualRefreshCooldownPrefix = `refresh:manual:v1:`;
+const manualRefreshCooldownSeconds = 10 * 60;
 const refreshTargetListLimit = 5000;
 const refreshJobListLimit = 80;
 const refreshAuditListLimit = 80;
@@ -264,6 +266,12 @@ function isOwnerEventsApiPath(pathname: string): boolean {
 function isOwnerApiPath(pathname: string): boolean {
   const parts = pathname.split("/").filter(Boolean);
   return parts.length === 2 && parts[0] === "api";
+}
+
+function isOwnerRefreshApiPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  const owner = parts[1] ?? "";
+  return isOwnerApiPath(pathname) && owner !== "me" && !owner.startsWith("_");
 }
 
 function isTrustProfileApiPath(pathname: string): boolean {
@@ -2491,6 +2499,20 @@ function cacheAgeMs(payload: DashboardPayload | null): number {
 
 function canDisplayCached(payload: DashboardPayload | null): payload is DashboardPayload {
   return cacheAgeMs(payload) <= maxDisplayStaleMs;
+}
+
+async function manualRefreshCooldownKey(key: string): Promise<string> {
+  return `${manualRefreshCooldownPrefix}${(await sha256Base64Url(key)).slice(0, 32)}`;
+}
+
+async function manualRefreshCooldownActive(env: Env, key: string): Promise<boolean> {
+  return Boolean(await env.DASHBOARD_CACHE?.get(await manualRefreshCooldownKey(key)));
+}
+
+async function markManualRefreshCooldown(env: Env, key: string): Promise<void> {
+  await env.DASHBOARD_CACHE?.put(await manualRefreshCooldownKey(key), new Date().toISOString(), {
+    expirationTtl: manualRefreshCooldownSeconds,
+  });
 }
 
 function profileKey(owner: string): string {
@@ -7844,6 +7866,89 @@ async function continueProgressiveBuild(dashboard: DashboardRequest, env: Env): 
   });
 }
 
+async function refreshDashboardMetadataFirst(
+  dashboard: DashboardRequest,
+  env: Env,
+): Promise<DashboardPayload | null> {
+  const lock = await acquireBuildLock(env, dashboard.key);
+  if (!lock) {
+    await auditSyncEvent(env, {
+      event: "dashboard_manual_refresh_skip",
+      targetKey: dashboard.key,
+      status: "locked",
+      reason: "build-lock",
+    });
+    return null;
+  }
+
+  const refresh = globalThis.setInterval(() => {
+    void lock.refresh();
+  }, buildLockRefreshMs);
+  const startedAt = Date.now();
+  await deleteProgress(env, dashboard.key);
+  await auditSyncEvent(env, {
+    event: "dashboard_manual_refresh_start",
+    targetKey: dashboard.key,
+    status: "running",
+    detail: "phase=metadata",
+  });
+  try {
+    const payload = await buildDashboard({
+      title: "ReleaseBar",
+      subtitle: dashboard.subtitle,
+      canonicalDomain: env.RELEASEDECK_CANONICAL_DOMAIN ?? "release.bar",
+      owners: dashboard.owners,
+      includeRepos: dashboard.includeRepos,
+      excludeRepos: dashboard.profile?.hiddenRepos,
+      ...optionsFromUrl(dashboard.url),
+      repoLimit,
+      repoScanLimit: 0,
+      repoScanTarget: repoLimit,
+      token: dashboard.token ?? env.GITHUB_TOKEN,
+      includeReleaseData: false,
+      quotaSource:
+        dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
+      quotaAccount: dashboard.quotaAccount ?? null,
+      fetch: auditGitHubFetch(
+        "dashboard",
+        dashboard.quotaSource ?? (dashboard.token || env.GITHUB_TOKEN ? "shared" : "anonymous"),
+        dashboard.quotaAccount ?? null,
+      ),
+      projectCache: env.DASHBOARD_CACHE,
+    });
+    const partial = withCacheState(
+      payload,
+      "partial",
+      "issue and PR counts refreshed; release data updating",
+    );
+    if (partial.cache?.progress) {
+      partial.cache.progress.done = false;
+    }
+    const profiled = withProfile(partial, dashboard.profile);
+    await writeCached(env, dashboard.key, profiled);
+    await writeProgress(env, dashboard.key, {
+      scannedRepos: [],
+      projects: profiled.projects,
+      updatedAt: profiled.generatedAt,
+    });
+    await auditSyncEvent(env, {
+      event: "dashboard_manual_refresh_metadata_done",
+      targetKey: dashboard.key,
+      status: "partial",
+      durationMs: Date.now() - startedAt,
+      projects: profiled.projects.length,
+      scanned: profiled.cache?.progress?.scanned,
+      limit: profiled.cache?.progress?.limit,
+      done: profiled.cache?.progress?.done,
+      detail: dashboardSyncDetail(profiled),
+    });
+    return profiled;
+  } finally {
+    globalThis.clearInterval(refresh);
+    await lock.release();
+  }
+}
+
 function errorPayload(dashboard: DashboardRequest, env: Env, message: string): DashboardPayload {
   return statusPayload(dashboard, env, "error", message, new Date().toISOString());
 }
@@ -8107,6 +8212,133 @@ async function ownerResponse(
     done: cached?.cache?.progress?.done,
     detail: `ageMs=${ageMs} owners=${ownerSlugs.length} repos=${includeRepos.length} includeReleaseData=${includeReleaseData}`,
   });
+
+  if (request.method === "POST") {
+    if (await manualRefreshCooldownActive(env, key)) {
+      await auditSyncEvent(env, {
+        event: "dashboard_manual_refresh_skip",
+        targetKey: key,
+        status: "cooldown",
+        reason: "cooldown",
+        detail: `cooldownSeconds=${manualRefreshCooldownSeconds}`,
+      });
+      if (displayCached) {
+        const state = cached.cache?.progress?.done === false ? "partial" : "stale";
+        return jsonResponse(
+          withCacheState(
+            cached,
+            state,
+            "manual refresh recently started; showing cached dashboard",
+          ),
+          202,
+          {
+            "cache-control": "no-store",
+            ...corsHeaders,
+          },
+        );
+      }
+      return jsonResponse({ error: "manual refresh recently started" }, 429, {
+        "cache-control": "no-store",
+        ...corsHeaders,
+      });
+    }
+    let owners: Owner[] | null = cached?.owners ?? null;
+    if (!owners) {
+      try {
+        owners = await resolveOwners(
+          ownerSlugs,
+          env,
+          token?.token,
+          token?.quotaSource,
+          token?.quotaAccount ?? null,
+        );
+      } catch (error) {
+        return jsonResponse({ error: dashboardErrorMessage(error) }, errorStatus(error), {
+          ...retryAfterHeaders(error),
+          ...corsHeaders,
+        });
+      }
+    }
+    if (!owners) {
+      return jsonResponse({ error: "owner not found" }, 404, {
+        "cache-control": "no-store",
+        ...corsHeaders,
+      });
+    }
+    const dashboard = dashboardRequest(
+      owners,
+      includeRepos,
+      profile,
+      key,
+      url,
+      includeReleaseData,
+      token,
+    );
+    if (!options.includeUnreleased) {
+      await markManualRefreshCooldown(env, key);
+      const build = rebuildWithBuildLock(dashboard, env);
+      context.waitUntil(
+        build
+          .then((built) =>
+            built?.cache?.progress?.done === false
+              ? continueProgressiveBuild(dashboard, env)
+              : undefined,
+          )
+          .catch((error) => cacheBuildError(dashboard, env, error)),
+      );
+      if (displayCached) {
+        return jsonResponse(
+          withCacheState(cached, "stale", "manual refresh started; release data updating"),
+          202,
+          {
+            "cache-control": "no-store",
+            ...corsHeaders,
+          },
+        );
+      }
+      return jsonResponse(rebuildingPayload(dashboard, env), 202, {
+        "cache-control": "no-store",
+        ...corsHeaders,
+      });
+    }
+
+    let payload: DashboardPayload | null;
+    try {
+      payload = await refreshDashboardMetadataFirst(dashboard, env);
+    } catch (error) {
+      const failed = errorPayload(dashboard, env, dashboardErrorMessage(error));
+      if (!displayCached) {
+        await writeCached(env, key, failed, 5 * 60);
+      }
+      return jsonResponse(failed, errorStatus(error), {
+        ...retryAfterHeaders(error),
+        ...corsHeaders,
+      });
+    }
+    if (payload) {
+      await markManualRefreshCooldown(env, key);
+      context.waitUntil(
+        continueProgressiveBuild(dashboard, env).catch((error) =>
+          cacheBuildError(dashboard, env, error),
+        ),
+      );
+      return jsonResponse(payload, 202, { "cache-control": "no-store", ...corsHeaders });
+    }
+    if (displayCached) {
+      return jsonResponse(
+        withCacheState(cached, "partial", "manual refresh already running"),
+        202,
+        {
+          "cache-control": "no-store",
+          ...corsHeaders,
+        },
+      );
+    }
+    return jsonResponse(rebuildingPayload(dashboard, env), 202, {
+      "cache-control": "no-store",
+      ...corsHeaders,
+    });
+  }
 
   if (displayCached && cached.cache?.state === "error") {
     const dashboard = cachedDashboardRequest(
@@ -8408,6 +8640,7 @@ export default {
     const audienceBackfillWrite =
       isRepoAudienceBackfillApiPath(url.pathname) && request.method === "POST";
     const adminWrite = url.pathname === "/api/admin/scheduler/run" && request.method === "POST";
+    const ownerRefreshWrite = isOwnerRefreshApiPath(url.pathname) && request.method === "POST";
     const clientTimingWrite = url.pathname === "/api/_client-timing" && request.method === "POST";
     if (
       request.method !== "GET" &&
@@ -8415,6 +8648,7 @@ export default {
       !profileWrite &&
       !audienceBackfillWrite &&
       !adminWrite &&
+      !ownerRefreshWrite &&
       !clientTimingWrite
     ) {
       return jsonResponse({ error: "method not allowed" }, 405, { allow: "GET" });

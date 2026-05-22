@@ -3989,6 +3989,289 @@ test("worker keeps repository detail when work trend search is rate limited", as
   }
 });
 
+test("worker manual dashboard refresh returns metadata before release hydration", async () => {
+  const originalFetch = globalThis.fetch;
+  const waits: Array<Promise<unknown>> = [];
+  const repoNode = (issues: number, pullRequests: number) => ({
+    owner: { login: "owner", __typename: "User" },
+    name: "repo",
+    nameWithOwner: "owner/repo",
+    description: "Manual refresh repo",
+    url: "https://github.com/owner/repo",
+    defaultBranchRef: { name: "main" },
+    primaryLanguage: { name: "TypeScript" },
+    repositoryTopics: { nodes: [] },
+    stargazerCount: 42,
+    forkCount: 2,
+    issues: { totalCount: issues },
+    pullRequests: { totalCount: pullRequests },
+    isArchived: false,
+    isFork: false,
+    isPrivate: false,
+    pushedAt: "2026-05-15T00:00:00Z",
+    updatedAt: "2026-05-15T00:00:00Z",
+    releases: {
+      nodes: [
+        {
+          tagName: "v1.0.0",
+          name: null,
+          url: "https://github.com/owner/repo/releases/tag/v1.0.0",
+          isDraft: false,
+          publishedAt: "2026-05-01T00:00:00Z",
+        },
+      ],
+    },
+  });
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/users/owner") {
+      return Response.json({
+        login: "owner",
+        type: "User",
+        avatar_url: "https://avatars.githubusercontent.com/u/1",
+        html_url: "https://github.com/owner",
+      });
+    }
+    if (url.pathname === "/graphql") {
+      return Response.json({
+        data: {
+          repositoryOwner: {
+            __typename: "User",
+            repositories: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [repoNode(9, 4)],
+            },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/commits/main") {
+      return Response.json({
+        sha: "abcdef123456",
+        commit: { committer: { date: "2026-05-15T00:00:00Z" } },
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/compare/v1.0.0...main") {
+      return Response.json({
+        total_commits: 3,
+        html_url: "https://github.com/owner/repo/compare/v1.0.0...main",
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/commits/abcdef123456/check-runs") {
+      return Response.json({ check_runs: [] });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = { DASHBOARD_CACHE: kvStore(), GITHUB_TOKEN: "shared-token" };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/owner", { method: "POST" }),
+      env,
+      { waitUntil: (promise) => waits.push(promise) },
+    );
+    assert.equal(response.status, 202);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.state, "partial");
+    assert.equal(body.cache?.progress?.done, false);
+    assert.match(body.cache?.message ?? "", /issue and PR counts refreshed/);
+    assert.equal(body.projects[0]?.openIssues, 9);
+    assert.equal(body.projects[0]?.openPullRequests, 4);
+    assert.equal(body.projects[0]?.version, "repo search");
+
+    const repeated = await worker.fetch(
+      new Request("https://release.bar/api/owner", { method: "POST" }),
+      env,
+      { waitUntil: (promise) => waits.push(promise) },
+    );
+    assert.equal(repeated.status, 202);
+    const repeatedBody = (await repeated.json()) as DashboardPayload;
+    assert.match(repeatedBody.cache?.message ?? "", /manual refresh recently started/);
+    assert.equal(repeatedBody.projects[0]?.openIssues, 9);
+
+    await Promise.all(waits);
+    const cached = await worker.fetch(new Request("https://release.bar/api/owner"), env, {
+      waitUntil: () => undefined,
+    });
+    const hydrated = (await cached.json()) as DashboardPayload;
+    assert.equal(hydrated.cache?.state, "fresh");
+    assert.equal(hydrated.projects[0]?.version, "v1.0.0");
+    assert.equal(hydrated.projects[0]?.commitsSinceRelease, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker manual dashboard refresh returns structured GitHub errors", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/users/owner") {
+      return Response.json({
+        login: "owner",
+        type: "User",
+        avatar_url: "https://avatars.githubusercontent.com/u/1",
+        html_url: "https://github.com/owner",
+      });
+    }
+    if (url.pathname === "/graphql") {
+      return Response.json(
+        { message: "API rate limit exceeded" },
+        {
+          status: 403,
+          headers: { "x-ratelimit-remaining": "0", "retry-after": "30" },
+        },
+      );
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = { DASHBOARD_CACHE: kvStore(), GITHUB_TOKEN: "shared-token" };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/owner", { method: "POST" }),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "30");
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.cache?.state, "error");
+    assert.match(body.cache?.message ?? "", /GitHub shared API quota is exhausted/);
+
+    const key = dashboardCacheKey({ owner: "owner", includeUnreleased: true, schemaVersion: 5 });
+    const dashboard = testDashboard("owner", [testProject({ owner: "owner", name: "repo" })]);
+    dashboard.generatedAt = new Date().toISOString();
+    if (dashboard.cache && dashboard.options) {
+      dashboard.cache.generatedAt = dashboard.generatedAt;
+      dashboard.options.includeUnreleased = true;
+    }
+    const cache = kvStore({ [key]: JSON.stringify(dashboard) });
+    const cachedResponse = await worker.fetch(
+      new Request("https://release.bar/api/owner", { method: "POST" }),
+      { DASHBOARD_CACHE: cache, GITHUB_TOKEN: "shared-token" },
+      { waitUntil: () => undefined },
+    );
+    assert.equal(cachedResponse.status, 429);
+    const cached = JSON.parse((await cache.get(key)) ?? "{}") as DashboardPayload;
+    assert.equal(cached.cache?.state, "fresh");
+    assert.equal(cached.projects.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker manual dashboard refresh preserves released-only cache while rebuilding", async () => {
+  const originalFetch = globalThis.fetch;
+  const waits: Array<Promise<unknown>> = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/graphql") {
+      return Response.json({
+        data: {
+          repositoryOwner: {
+            __typename: "User",
+            repositories: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [
+                {
+                  owner: { login: "owner", __typename: "User" },
+                  name: "repo",
+                  nameWithOwner: "owner/repo",
+                  description: "Released repo",
+                  url: "https://github.com/owner/repo",
+                  defaultBranchRef: { name: "main" },
+                  primaryLanguage: { name: "TypeScript" },
+                  repositoryTopics: { nodes: [] },
+                  stargazerCount: 42,
+                  forkCount: 2,
+                  issues: { totalCount: 7 },
+                  pullRequests: { totalCount: 3 },
+                  isArchived: false,
+                  isFork: false,
+                  isPrivate: false,
+                  pushedAt: "2026-05-15T00:00:00Z",
+                  updatedAt: "2026-05-15T00:00:00Z",
+                  releases: {
+                    nodes: [
+                      {
+                        tagName: "v1.0.0",
+                        name: null,
+                        url: "https://github.com/owner/repo/releases/tag/v1.0.0",
+                        isDraft: false,
+                        publishedAt: "2026-05-01T00:00:00Z",
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/commits/main") {
+      return Response.json({
+        sha: "abcdef123456",
+        commit: { committer: { date: "2026-05-15T00:00:00Z" } },
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/compare/v1.0.0...main") {
+      return Response.json({
+        total_commits: 3,
+        html_url: "https://github.com/owner/repo/compare/v1.0.0...main",
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/commits/abcdef123456/check-runs") {
+      return Response.json({ check_runs: [] });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const key = dashboardCacheKey({ owner: "owner", includeUnreleased: false, schemaVersion: 5 });
+  const dashboard = testDashboard("owner", [testProject({ owner: "owner", name: "repo" })]);
+  dashboard.generatedAt = new Date().toISOString();
+  if (dashboard.cache) {
+    dashboard.cache.generatedAt = dashboard.generatedAt;
+  }
+  const env = {
+    DASHBOARD_CACHE: kvStore({ [key]: JSON.stringify(dashboard) }),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/owner?unreleased=false", { method: "POST" }),
+      env,
+      { waitUntil: (promise) => waits.push(promise) },
+    );
+    assert.equal(response.status, 202);
+    const body = (await response.json()) as DashboardPayload;
+    assert.equal(body.projects.length, 1);
+    assert.equal(body.projects[0]?.version, "v1.0.0");
+    assert.match(body.cache?.message ?? "", /release data updating/);
+
+    await Promise.all(waits);
+    const cached = await worker.fetch(
+      new Request("https://release.bar/api/owner?unreleased=false"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    const hydrated = (await cached.json()) as DashboardPayload;
+    assert.equal(hydrated.projects[0]?.openIssues, 7);
+    assert.equal(hydrated.projects[0]?.openPullRequests, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker rejects POST to reserved read-only owner-like APIs", async () => {
+  for (const path of ["/api/me", "/api/_hot", "/api/_discover"]) {
+    const response = await worker.fetch(
+      new Request(`https://release.bar${path}`, { method: "POST" }),
+      {},
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 405, path);
+  }
+});
+
 test("worker marks GitHub discovery hydration complete when release scan is rate limited", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {

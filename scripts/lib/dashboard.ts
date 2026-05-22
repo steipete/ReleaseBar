@@ -1108,9 +1108,7 @@ export async function buildDashboard(options: DashboardBuildOptions): Promise<Da
       let ownerVisible = ownerExisting;
       let hydratedThisOwner = 0;
       let page = 1;
-      const scanLimit = includeReleaseData
-        ? (options.repoScanLimit ?? Number.POSITIVE_INFINITY)
-        : Number.POSITIVE_INFINITY;
+      const scanLimit = options.repoScanLimit ?? Number.POSITIVE_INFINITY;
       if (includeReleaseData && options.includeUnreleased) {
         const hydrateQueue: GitHubRepo[] = [];
         let metadataChanged = false;

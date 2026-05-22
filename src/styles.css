@@ -322,7 +322,8 @@ h1 {
   white-space: nowrap;
 }
 
-.theme-toggle {
+.theme-toggle,
+.refresh-toggle {
   display: inline-flex;
   width: 32px;
   height: 32px;
@@ -341,15 +342,23 @@ h1 {
 }
 
 .theme-toggle:hover,
-.theme-toggle:focus-visible {
+.theme-toggle:focus-visible,
+.refresh-toggle:hover,
+.refresh-toggle:focus-visible {
   border-color: var(--green);
   color: var(--green);
   background: color-mix(in srgb, var(--green) 10%, transparent);
   outline: 0;
 }
 
-.theme-toggle svg {
+.theme-toggle svg,
+.refresh-toggle svg {
   display: block;
+}
+
+.refresh-toggle[disabled] {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .status {

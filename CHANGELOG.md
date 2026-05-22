@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a manual dashboard refresh button that refreshes cheap issue and PR counts first, then continues release hydration in the background.
 - Replaced the generic `</>` favicon with a green release-tag silhouette so the tab icon reads as ReleaseBar at 16px and aligns with the release/version brand.
 - Added browser-side dashboard timing beacons for cached boot renders, API fetches, and streamed updates so client latency can be compared with Worker background tail duration.
 - Logged dashboard sync, progressive refresh, stream delivery, and discover hydration phases so fast visible data and slower GitHub scans can be studied separately.

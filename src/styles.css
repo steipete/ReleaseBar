@@ -514,6 +514,21 @@ h1 {
   line-height: 1;
 }
 
+.trust-snapshot-score {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.trust-snapshot-score .panel-kicker {
+  grid-column: 1 / -1;
+}
+
+.trust-snapshot-score .audience-tier {
+  justify-self: start;
+}
+
 .trust-snapshot button {
   min-height: 32px;
   white-space: nowrap;
@@ -886,6 +901,12 @@ input {
 
 input::placeholder {
   color: var(--muted);
+}
+
+.prompt input {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .metrics {
@@ -2815,32 +2836,124 @@ body.dev-mode .table-head .since-heading .label-compact {
 
 @media (max-width: 860px) {
   .shell {
-    width: min(100vw - 20px, 720px);
-    padding: 24px 0;
+    width: min(100vw - 16px, 720px);
+    padding: 18px 0 28px;
   }
 
   .topline {
-    display: block;
+    display: grid;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  h1 {
+    font-size: clamp(36px, 12vw, 56px);
+  }
+
+  .subtitle {
+    margin-top: 10px;
+    font-size: 13px;
+  }
+
+  .hero-owner-title,
+  .hero-owner-link,
+  .repo-hero-title {
+    gap: 10px;
+  }
+
+  .hero-owner-avatar,
+  .repo-title-avatar {
+    width: clamp(48px, 15vw, 62px);
+    height: clamp(48px, 15vw, 62px);
+  }
+
+  .repo-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+  }
+
+  .repo-actions a {
+    min-width: 0;
+    min-height: 36px;
   }
 
   .top-actions {
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     flex-wrap: wrap;
-    margin-top: 18px;
+    gap: 8px;
+    margin-top: 0;
   }
 
   .status {
+    flex: 1 1 100%;
     margin-top: 0;
+    font-size: 12px;
+  }
+
+  .account-button {
+    width: auto;
+    min-width: min(164px, calc(100vw - 112px));
+  }
+
+  .account-label {
+    max-width: min(18ch, calc(100vw - 178px));
+  }
+
+  .discover-nav {
+    flex-wrap: nowrap;
+    gap: 10px;
+    margin: -2px -8px 16px;
+    padding: 0 8px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .discover-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .discover-group {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+  }
+
+  .discover-group a {
+    white-space: nowrap;
   }
 
   .settings-panel,
   .settings-panel[data-open] {
     grid-template-columns: 1fr;
+    padding: 14px 44px 14px 14px;
+  }
+
+  .source-form,
+  .profile-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .source-form button,
+  .profile-actions button {
+    min-height: 36px;
   }
 
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metrics .metric-action {
+    padding: 14px 12px;
+  }
+
+  .metrics span {
+    font-size: 24px;
+  }
+
+  .metrics small {
+    min-height: 28px;
+    line-height: 1.25;
   }
 
   .admin-toolbar {
@@ -2913,15 +3026,6 @@ body.dev-mode .table-head .since-heading .label-compact {
     grid-template-columns: 1fr;
   }
 
-  .project {
-    grid-template-columns: 1fr;
-    margin: 10px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    overflow: hidden;
-    background: color-mix(in srgb, var(--panel) 38%, transparent);
-  }
-
   .trust-factors div {
     grid-template-columns: minmax(0, 1fr) 58px 48px;
   }
@@ -2952,9 +3056,25 @@ body.dev-mode .table-head .since-heading .label-compact {
     border-top: 1px solid var(--line);
   }
 
+  .filters {
+    flex-wrap: nowrap;
+    gap: 7px;
+    margin: 14px -8px;
+    padding: 0 8px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .filters::-webkit-scrollbar {
+    display: none;
+  }
+
+  .filters button,
   .dev-toggle {
-    width: 100%;
+    flex: 0 0 auto;
+    width: auto;
     margin-left: 0;
+    white-space: nowrap;
   }
 
   .site-footer {
@@ -2962,21 +3082,83 @@ body.dev-mode .table-head .since-heading .label-compact {
     margin-top: -4px;
   }
 
+  .prompt {
+    display: flex;
+    min-height: 56px;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .prompt input {
+    order: 2;
+  }
+
   .quick-jump {
-    width: 64px;
-    min-width: 64px;
-    height: 40px;
+    order: 1;
+    width: 48px;
+    min-width: 48px;
+    flex: 0 0 48px;
+    height: 36px;
     gap: 7px;
-    padding: 0 10px;
+    padding: 0;
+  }
+
+  .table-wrap {
+    border: 0;
+    background: transparent;
+    overflow: visible;
   }
 
   .table-head {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    display: flex;
+    gap: 7px;
+    margin: 0 -8px 10px;
+    padding: 8px;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+    scrollbar-width: none;
+  }
+
+  .table-head::-webkit-scrollbar {
     display: none;
   }
 
-  .project {
-    grid-template-columns: 1fr;
-    margin: 10px;
+  .table-head button {
+    flex: 0 0 auto;
+    min-height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0 10px;
+    background: var(--panel);
+    white-space: nowrap;
+  }
+
+  .table-head button[aria-current="true"] {
+    border-color: var(--green);
+    background: rgba(156, 255, 87, 0.075);
+  }
+
+  .projects {
+    display: grid;
+    gap: 10px;
+  }
+
+  .project,
+  body.dev-mode .project {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "repo repo"
+      "release activity"
+      "since stars"
+      "issues prs"
+      "ci ci";
+    margin: 0;
     border: 1px solid var(--line);
     border-radius: var(--radius);
     overflow: hidden;
@@ -2984,13 +3166,46 @@ body.dev-mode .table-head .since-heading .label-compact {
   }
 
   .project > div {
-    border-right: 0;
     border-top: 1px solid var(--line);
-    padding: 12px 14px;
+    border-right: 0;
+    padding: 11px 12px;
   }
 
-  .project > div:first-child {
+  .repo-cell {
+    grid-area: repo;
     border-top: 0;
+  }
+
+  .stars-cell {
+    grid-area: stars;
+  }
+
+  .release-cell {
+    grid-area: release;
+    border-right: 1px solid var(--line);
+  }
+
+  .since-cell {
+    grid-area: since;
+    border-right: 1px solid var(--line);
+  }
+
+  .activity-cell {
+    grid-area: activity;
+  }
+
+  .issues-cell {
+    grid-area: issues;
+    border-right: 1px solid var(--line);
+  }
+
+  .prs-cell {
+    grid-area: prs;
+  }
+
+  .ci-cell {
+    grid-area: ci;
+    border-right: 0;
   }
 
   .release-cell::before,
@@ -3039,10 +3254,7 @@ body.dev-mode .table-head .since-heading .label-compact {
   .since-cell,
   .issues-cell,
   .prs-cell {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: baseline;
-    gap: 12px;
+    display: block;
   }
 
   .stars-cell::before,
@@ -3056,13 +3268,70 @@ body.dev-mode .table-head .since-heading .label-compact {
   .activity-cell,
   .ci-cell {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 6px 12px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
   }
 
   .release-cell::before,
   .activity-cell::before,
   .ci-cell::before {
     grid-column: 1 / -1;
+  }
+
+  .repo-title {
+    align-items: flex-start;
+  }
+
+  .row-owner-avatar-link {
+    width: 24px;
+    height: 24px;
+    flex-basis: 24px;
+  }
+
+  .row-owner-avatar {
+    width: 20px;
+    height: 20px;
+  }
+
+  .description {
+    min-height: 0;
+    margin: 7px 0 9px;
+    -webkit-line-clamp: 2;
+    font-size: 12px;
+  }
+
+  .tags {
+    gap: 5px;
+    overflow: hidden;
+    max-height: 49px;
+  }
+
+  .tag {
+    min-height: 20px;
+    padding: 0 7px;
+    font-size: 10px;
+  }
+
+  .release-version {
+    margin-top: 2px;
+  }
+
+  .release-cell span,
+  .activity-cell span,
+  .ci-cell span {
+    margin-top: 0;
+  }
+
+  .since-cell a,
+  .since-cell {
+    font-size: 26px;
+    line-height: 1;
+  }
+
+  .issues-cell a,
+  .prs-cell a,
+  .stars-cell strong {
+    font-size: 22px;
+    line-height: 1;
   }
 }

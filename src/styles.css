@@ -22,6 +22,7 @@
   --mobile-project-bg: rgba(16, 19, 15, 0.38);
   --mobile-project-cell: color-mix(in srgb, var(--panel) 84%, transparent);
 
+
   /* Shape */
   --radius: 8px;
   --control-height: 36px;
@@ -54,6 +55,7 @@
   --hero-glow: rgba(31, 120, 144, 0.055);
   --mobile-project-bg: #e6e0d1;
   --mobile-project-cell: #fffdf8;
+
 
   --shadow: 0 18px 60px rgba(20, 30, 18, 0.12);
 }
@@ -487,7 +489,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px 16px;
-  background: rgba(16, 19, 15, 0.68);
+  background: var(--panel);
 }
 
 .trust-snapshot > div {
@@ -625,7 +627,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 11px;
-  background: rgba(8, 9, 8, 0.44);
+  background: var(--panel);
 }
 
 .trust-summary span,
@@ -674,7 +676,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
-  background: rgba(8, 9, 8, 0.38);
+  background: var(--panel);
 }
 
 .trust-factors strong,
@@ -753,7 +755,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
-  background: rgba(8, 9, 8, 0.42);
+  background: var(--panel);
   color: var(--text);
 }
 
@@ -788,7 +790,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 6px 9px;
-  background: rgba(8, 9, 8, 0.42);
+  background: var(--panel);
   color: var(--muted);
   font-size: 12px;
 }

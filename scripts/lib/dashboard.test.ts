@@ -28,6 +28,7 @@ import {
 } from "../../src/routing.js";
 import {
   attentionReasons,
+  matchesProjectSearch,
   needsAttention,
   parseViewState,
   showCodeChurn,
@@ -527,6 +528,26 @@ test("dashboard project sorting handles dev issue and pull request counts numeri
     ).map((project) => project.name),
     ["large", "small"],
   );
+});
+
+test("dashboard project search matches independent metadata terms", () => {
+  const project = testProject({
+    owner: "owner",
+    name: "releasebar",
+    description: "Manual refresh dashboard",
+    language: "TypeScript",
+    topics: ["cloudflare", "worker"],
+    version: "v1.2.3",
+    releaseName: "Ship dashboard search",
+    ciState: "failure",
+    ciWorkflow: "CI",
+  });
+
+  assert.equal(matchesProjectSearch(project, ""), true);
+  assert.equal(matchesProjectSearch(project, "typescript v1.2.3"), true);
+  assert.equal(matchesProjectSearch(project, "owner worker ci"), true);
+  assert.equal(matchesProjectSearch(project, "ship failure"), true);
+  assert.equal(matchesProjectSearch(project, "typescript swift"), false);
 });
 
 test("dashboard stream signature changes when dev sort counts change", () => {

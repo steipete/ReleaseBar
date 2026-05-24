@@ -15,6 +15,7 @@
     filterOptions,
     isDevSortKey,
     matchesFilter,
+    matchesProjectSearch,
     attentionReasons,
     needsAttention,
     parseViewState,
@@ -583,22 +584,7 @@
     if (hiddenOwnerSet.has(project.owner.toLowerCase())) return false;
     if (hiddenRepoSet.has(project.fullName.toLowerCase())) return false;
     if (languageQuery && project.language?.toLowerCase() !== languageQuery.toLowerCase()) return false;
-    const normalizedQuery = searchQuery.trim().toLowerCase();
-    if (!normalizedQuery) return true;
-    const haystack = [
-      project.fullName,
-      project.description,
-      project.language,
-      ...(project.topics ?? []),
-      project.version,
-      project.freshness,
-      project.ciState,
-      project.ciWorkflow,
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(normalizedQuery);
+    return matchesProjectSearch(project, searchQuery);
   }
 
   function persistVisibility(nextOwners = hiddenOwners, nextRepos = hiddenRepos): void {

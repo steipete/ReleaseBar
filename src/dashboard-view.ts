@@ -139,6 +139,26 @@ export function matchesFilter(project: Project, value: DashboardFilter): boolean
   return project.freshness === value;
 }
 
+export function matchesProjectSearch(project: Project, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const haystack = [
+    project.fullName,
+    project.description,
+    project.language,
+    ...(project.topics ?? []),
+    project.version,
+    project.releaseName,
+    project.freshness,
+    project.ciState,
+    project.ciWorkflow,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
 export function sortValue(project: Project, key: SortKey): string | number {
   switch (key) {
     case "repo":

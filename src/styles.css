@@ -22,7 +22,6 @@
   --mobile-project-bg: rgba(16, 19, 15, 0.38);
   --mobile-project-cell: color-mix(in srgb, var(--panel) 84%, transparent);
 
-
   /* Shape */
   --radius: 8px;
   --control-height: 36px;
@@ -55,7 +54,6 @@
   --hero-glow: rgba(31, 120, 144, 0.055);
   --mobile-project-bg: #e6e0d1;
   --mobile-project-cell: #fffdf8;
-
 
   --shadow: 0 18px 60px rgba(20, 30, 18, 0.12);
 }

@@ -168,7 +168,8 @@ export function dashboardRoute(
   if (!owner) {
     const custom = extraOwners.length > 0 || repos.length > 0;
     const discoverPeriod = discoverPeriodFromSearch(search);
-    const discoverLanguage = discoverLanguageFromSearch(search);
+    const discoverLanguage =
+      discoverPeriod === "releasebar" ? "" : discoverLanguageFromSearch(search);
     const discoverQuery = new URLSearchParams();
     if (discoverPeriod !== "week") discoverQuery.set("period", discoverPeriod);
     if (discoverLanguage) discoverQuery.set("lang", discoverLanguage);

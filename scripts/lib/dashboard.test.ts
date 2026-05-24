@@ -386,6 +386,7 @@ test("owner route parsing keeps root hot board and owners API-backed", () => {
     dashboardRoute("/", "?period=releasebar&hotLang=TypeScript").apiPath,
     `${workerApiOrigin}/api/_hot`,
   );
+  assert.equal(dashboardRoute("/", "?period=releasebar&hotLang=TypeScript").discoverLanguage, "");
   assert.equal(
     dashboardRoute("/", "?period=day&lang=TypeScript").apiPath,
     `${workerApiOrigin}/api/_discover?period=day`,

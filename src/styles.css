@@ -487,7 +487,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px 16px;
-  background: rgba(16, 19, 15, 0.68);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
 }
 
 .trust-snapshot > div {

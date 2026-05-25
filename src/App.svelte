@@ -1424,6 +1424,17 @@
       : "bounded public GitHub trust signals";
   }
 
+  function ownerSignalTooltip(payload: TrustProfilePayload | null = trustProfile): string {
+    if (payload?.type === "org" || (!payload && ownerHero(data)?.type === "org")) {
+      return "0–100 bounded public GitHub organization signal from profile, repository footprint, reach, and account safety. Triage context only, not a personal trust score.";
+    }
+    return "0–100 bounded public GitHub signal from account age, profile completeness, public reach, builder history, organizations, and account safety. Triage context only, not identity proof.";
+  }
+
+  function personTrustScoreTooltip(score: number): string {
+    return `Trust score ${numberFormat.format(score)} — bounded public GitHub profile signal; triage context only.`;
+  }
+
   function ownerSignalTabLabel(payload: TrustProfilePayload | null = trustProfile): string {
     return payload?.type === "org" || (!payload && ownerHero(data)?.type === "org")
       ? "org signal"
@@ -2878,7 +2889,8 @@
                     {#if contributor.trustScore !== undefined}
                       <small
                         class={`person-score-pill tier-${contributor.trustTier ?? "low"}`}
-                        title={`trust score ${numberFormat.format(contributor.trustScore)}`}
+                        title={personTrustScoreTooltip(contributor.trustScore)}
+                        aria-label={personTrustScoreTooltip(contributor.trustScore)}
                       >
                         {numberFormat.format(contributor.trustScore)}
                       </small>
@@ -3057,7 +3069,8 @@
                           {#if user.trustScore !== undefined}
                             <small
                               class={`person-score-pill tier-${user.trustTier ?? "low"}`}
-                              title={`trust score ${numberFormat.format(user.trustScore)}`}
+                              title={personTrustScoreTooltip(user.trustScore)}
+                              aria-label={personTrustScoreTooltip(user.trustScore)}
                             >
                               {numberFormat.format(user.trustScore)}
                             </small>
@@ -3127,7 +3140,7 @@
         <strong>unavailable</strong>
         <small>{trustProfileError}</small>
       {:else if trustProfile}
-        <div class="trust-snapshot-score">
+        <div class="trust-snapshot-score" title={ownerSignalTooltip(trustProfile)} aria-label={`${ownerSignalLabel(trustProfile)} ${trustProfile.score}: ${ownerSignalTooltip(trustProfile)}`}>
           <span class="panel-kicker">{ownerSignalLabel(trustProfile)}</span>
           <strong>{trustProfile.score}</strong>
           <small class={`audience-tier tier-${trustProfile.tier}`}>{trustProfile.tier}</small>
@@ -3156,7 +3169,7 @@
   {#if showTrustProfile && ownerTab === "trust"}
     <section class="trust-panel" aria-label={`GitHub ${ownerSignalLabel()} profile`}>
       <div class="panel-heading">
-        <div>
+        <div title={ownerSignalTooltip(trustProfile)} aria-label={trustProfile ? `${ownerSignalLabel(trustProfile)} ${trustProfile.score}: ${ownerSignalTooltip(trustProfile)}` : ownerSignalTooltip(trustProfile)}>
           <span class="panel-kicker">{ownerSignalTabLabel()}</span>
           <h2>{trustProfile ? `${trustProfile.score}` : "loading"}</h2>
         </div>

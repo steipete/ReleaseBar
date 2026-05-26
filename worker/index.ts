@@ -5159,11 +5159,11 @@ function activityRepoUrl(repo: string): string {
 
 function normalizeActivityEvent(event: GitHubPublicEvent): OwnerActivityEvent | null {
   if (event.public === false) return null;
-  const repo = event.repo.name;
+  const repo = event.repo?.name?.trim() ?? "";
   const payload = event.payload;
   const createdAt = event.created_at;
-  const repoUrl = activityRepoUrl(repo);
   if (!repo || !createdAt) return null;
+  const repoUrl = activityRepoUrl(repo);
 
   if (event.type === "PushEvent") {
     const payloadData = payloadRecord(payload);

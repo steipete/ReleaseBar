@@ -234,9 +234,11 @@ export const gitHubPublicEventSchema = v.looseObject({
   type: v.string(),
   public: v.optional(v.boolean()),
   created_at: v.string(),
-  repo: v.looseObject({
-    name: v.string(),
-  }),
+  repo: v.optional(
+    v.looseObject({
+      name: v.optional(v.string()),
+    }),
+  ),
   payload: v.optional(v.unknown()),
 });
 

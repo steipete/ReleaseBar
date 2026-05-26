@@ -3417,6 +3417,17 @@ test("worker summarizes public owner activity in the background", async () => {
           },
         },
         {
+          id: "repo-missing",
+          type: "PushEvent",
+          public: true,
+          created_at: generatedAt,
+          repo: {},
+          payload: {
+            size: 1,
+            commits: [{ message: "This malformed event should be ignored" }],
+          },
+        },
+        {
           id: "3",
           type: "PushEvent",
           public: false,

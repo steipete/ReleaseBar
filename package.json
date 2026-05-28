@@ -27,7 +27,7 @@
     "bits-ui": "^2.18.1",
     "svelte": "^5.55.9",
     "svelte-command-palette": "^2.0.2",
-    "valibot": "^1.4.0"
+    "valibot": "^1.4.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",

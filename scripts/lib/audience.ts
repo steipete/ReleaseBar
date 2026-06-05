@@ -136,11 +136,16 @@ const notableOrgKeywords = [
   "vercel",
 ];
 
+// Treat "bot" as a bot marker only when it is a standalone trailing token
+// (e.g. my-bot, ci.bot, gpt4bot, or exactly "bot"), not when it is the tail of
+// an ordinary human login such as cabot, talbot, or abbot. Real GitHub App
+// accounts always carry the explicit "[bot]" suffix, matched separately below.
+const BOT_SUFFIX = /(?:^|[^a-z])bot$/;
+
 export function isLikelyBot(login: string): boolean {
   const normalized = login.toLowerCase();
   return (
-    normalized.endsWith("bot") ||
-    normalized.endsWith("-bot") ||
+    BOT_SUFFIX.test(normalized) ||
     normalized.endsWith("[bot]") ||
     normalized.includes("bot-") ||
     normalized.startsWith("github-actions") ||

@@ -759,6 +759,45 @@ test("audience scoring uses only public profile and stargazer signals", () => {
   assert.equal(low.factors.find((factor) => factor.key === "risk")?.sentiment, "negative");
 });
 
+test("isLikelyBot flags automation without misclassifying human logins ending in bot", () => {
+  // Real automation accounts are still detected.
+  for (const login of [
+    "dependabot",
+    "renovate",
+    "github-actions[bot]",
+    "my-bot",
+    "foo[bot]",
+    "gpt4bot",
+    "bot",
+  ]) {
+    assert.equal(isLikelyBot(login), true, `${login} should be detected as a bot`);
+  }
+
+  // Ordinary human logins that merely end in the letters "bot" are not.
+  for (const login of ["cabot", "talbot", "abbot", "wilbot", "arbot"]) {
+    assert.equal(isLikelyBot(login), false, `${login} should not be treated as a bot`);
+  }
+
+  // A strong human profile whose login ends in "bot" is scored, not zeroed out.
+  const human = calculateAudienceScore({
+    login: "cabot",
+    followers: 5000,
+    following: 50,
+    publicRepos: 80,
+    publicGists: 2,
+    company: "GitHub",
+    bio: "Principal engineer",
+    location: "SF",
+    blog: null,
+    twitterUsername: null,
+    accountCreatedAt: "2015-01-01T00:00:00Z",
+    accountUpdatedAt: "2026-05-18T00:00:00Z",
+    starredAt: "2026-05-18T00:00:00Z",
+  });
+  assert.notEqual(human.tier, "bot");
+  assert.ok(human.score > 0);
+});
+
 test("need attention explains release debt, stale releases, CI, and open work", () => {
   const stale = testProject({
     owner: "owner",

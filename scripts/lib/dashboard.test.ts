@@ -759,28 +759,55 @@ test("audience scoring uses only public profile and stargazer signals", () => {
   assert.equal(low.factors.find((factor) => factor.key === "risk")?.sentiment, "negative");
 });
 
-test("isLikelyBot flags automation without misclassifying human logins ending in bot", () => {
-  // Real automation accounts are still detected.
+test("isLikelyBot uses account type before narrow login fallbacks", () => {
+  // GitHub account metadata is authoritative when it is available.
+  for (const login of ["cabot", "crawlerbot", "robot", "gpt4bot"]) {
+    assert.equal(isLikelyBot(login, "Bot"), true, `${login} with Bot type should be a bot`);
+    assert.equal(isLikelyBot(login, "App"), true, `${login} with App type should be a bot`);
+    assert.equal(isLikelyBot(login, "User"), false, `${login} with User type should be human`);
+  }
+
+  // Narrow lexical fallback for callers that do not have account type metadata.
   for (const login of [
     "dependabot",
     "renovate",
+    "github-actions",
     "github-actions[bot]",
     "my-bot",
+    "ci.bot",
+    "bot-ci",
     "foo[bot]",
-    "gpt4bot",
     "bot",
   ]) {
     assert.equal(isLikelyBot(login), true, `${login} should be detected as a bot`);
   }
 
-  // Ordinary human logins that merely end in the letters "bot" are not.
-  for (const login of ["cabot", "talbot", "abbot", "wilbot", "arbot"]) {
-    assert.equal(isLikelyBot(login), false, `${login} should not be treated as a bot`);
+  for (const login of ["renovate-bot", "bot-ci", "foo[bot]", "github-actions"]) {
+    assert.equal(
+      isLikelyBot(login, "User"),
+      true,
+      `${login} should keep explicit bot fallback with User metadata`,
+    );
+  }
+
+  // No-separator *bot names are ambiguous without metadata, so do not guess.
+  for (const login of [
+    "cabot",
+    "talbot",
+    "abbot",
+    "wilbot",
+    "arbot",
+    "crawlerbot",
+    "robot",
+    "gpt4bot",
+  ]) {
+    assert.equal(isLikelyBot(login), false, `${login} should require metadata before bot tier`);
   }
 
   // A strong human profile whose login ends in "bot" is scored, not zeroed out.
   const human = calculateAudienceScore({
     login: "cabot",
+    accountType: "User",
     followers: 5000,
     following: 50,
     publicRepos: 80,
@@ -796,6 +823,26 @@ test("isLikelyBot flags automation without misclassifying human logins ending in
   });
   assert.notEqual(human.tier, "bot");
   assert.ok(human.score > 0);
+
+  const typedBot = calculateAudienceScore({
+    login: "octocat",
+    accountType: "Bot",
+    followers: 5000,
+    following: 50,
+    publicRepos: 80,
+    publicGists: 2,
+    company: "GitHub",
+    bio: "Automation",
+    location: "CI",
+    blog: null,
+    twitterUsername: null,
+    accountCreatedAt: "2015-01-01T00:00:00Z",
+    accountUpdatedAt: "2026-05-18T00:00:00Z",
+    starredAt: "2026-05-18T00:00:00Z",
+  });
+  assert.equal(typedBot.score, 0);
+  assert.equal(typedBot.tier, "bot");
+  assert.deepEqual(typedBot.reasons, ["automation account"]);
 });
 
 test("need attention explains release debt, stale releases, CI, and open work", () => {
@@ -2060,6 +2107,7 @@ test("worker builds cached repository audience from public stargazers", async ()
                 {
                   starredAt: new Date().toISOString(),
                   node: {
+                    __typename: "User",
                     login: "principal",
                     avatarUrl: "https://avatars.githubusercontent.com/u/10",
                     url: "https://github.com/principal",
@@ -2068,6 +2116,16 @@ test("worker builds cached repository audience from public stargazers", async ()
                 {
                   starredAt: new Date().toISOString(),
                   node: {
+                    __typename: "User",
+                    login: "cabot",
+                    avatarUrl: "https://avatars.githubusercontent.com/u/13",
+                    url: "https://github.com/cabot",
+                  },
+                },
+                {
+                  starredAt: new Date().toISOString(),
+                  node: {
+                    __typename: "User",
                     login: "quiet",
                     avatarUrl: "https://avatars.githubusercontent.com/u/11",
                     url: "https://github.com/quiet",
@@ -2076,6 +2134,7 @@ test("worker builds cached repository audience from public stargazers", async ()
                 {
                   starredAt: new Date().toISOString(),
                   node: {
+                    __typename: "Bot",
                     login: "renovate-bot",
                     avatarUrl: "https://avatars.githubusercontent.com/u/12",
                     url: "https://github.com/renovate-bot",
@@ -2156,6 +2215,32 @@ test("worker builds cached repository audience from public stargazers", async ()
         created_at: "2012-01-01T00:00:00Z",
         updated_at: "2026-05-16T12:00:00Z",
       });
+    }
+    if (path === "/users/cabot") {
+      return Response.json({
+        login: "cabot",
+        avatar_url: "https://avatars.githubusercontent.com/u/13",
+        html_url: "https://github.com/cabot",
+        type: "User",
+        name: "C. Abot",
+        company: "GitHub",
+        bio: "Principal engineer building developer tools",
+        location: "San Francisco",
+        blog: "https://cabot.dev",
+        twitter_username: "cabot",
+        followers: 5000,
+        following: 50,
+        public_repos: 80,
+        public_gists: 2,
+        created_at: "2015-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (path === "/users/cabot/orgs") {
+      return Response.json([]);
+    }
+    if (path === "/users/cabot/repos") {
+      return Response.json([]);
     }
     if (path === "/users/principal/orgs") {
       return Response.json([
@@ -2267,13 +2352,17 @@ test("worker builds cached repository audience from public stargazers", async ()
     assert.equal(body.users[0]?.orgs[0]?.login, "github");
     assert.equal(body.users[0]?.topRepositories[0]?.fullName, "principal/release-tools");
     assert.match(body.users[0]?.reasons.join(" ") ?? "", /notable org: github/);
+    const cabot = body.users.find((user) => user.login === "cabot");
+    assert.notEqual(cabot?.tier, "bot");
+    assert.ok((cabot?.score ?? 0) > 0);
     assert.equal(body.totals.stargazers, 1234);
     assert.equal(body.totals.highSignal, 1);
+    assert.equal(body.totals.mediumSignal, 1);
     assert.equal(body.totals.bots, 1);
-    assert.equal(body.totals.highSignalPercent, 33);
-    assert.equal(body.totals.mediumSignalPercent, 0);
-    assert.equal(body.totals.lowSignalPercent, 33);
-    assert.equal(body.totals.botPercent, 33);
+    assert.equal(body.totals.highSignalPercent, 25);
+    assert.equal(body.totals.mediumSignalPercent, 25);
+    assert.equal(body.totals.lowSignalPercent, 25);
+    assert.equal(body.totals.botPercent, 25);
     assert.equal(body.cache.quota?.source, "shared");
 
     const cached = await worker.fetch(
@@ -2282,7 +2371,7 @@ test("worker builds cached repository audience from public stargazers", async ()
       { waitUntil: () => undefined },
     );
     assert.equal(cached.status, 200);
-    assert.equal(calls, 9);
+    assert.equal(calls, 12);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2829,6 +2918,59 @@ test("worker builds bounded trust profiles for people pages", async () => {
       "/users/principal/orgs",
       "/users/principal/repos",
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("worker preserves bot tier for typed trust profiles", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/users/crawlerbot") {
+      return Response.json({
+        login: "crawlerbot",
+        avatar_url: "https://avatars.githubusercontent.com/u/99",
+        html_url: "https://github.com/crawlerbot",
+        type: "Bot",
+        name: null,
+        company: "GitHub",
+        bio: "Automation",
+        location: "CI",
+        blog: null,
+        twitter_username: null,
+        followers: 5000,
+        following: 0,
+        public_repos: 80,
+        public_gists: 0,
+        created_at: "2015-01-01T00:00:00Z",
+        updated_at: "2026-05-16T12:00:00Z",
+      });
+    }
+    if (url.pathname === "/users/crawlerbot/orgs") {
+      return Response.json([]);
+    }
+    if (url.pathname === "/users/crawlerbot/repos") {
+      return Response.json([]);
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const env = {
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_TOKEN: "shared-token",
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://release.bar/api/users/crawlerbot/trust"),
+      env,
+      { waitUntil: () => undefined },
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as TrustProfilePayload;
+    assert.equal(body.login, "crawlerbot");
+    assert.equal(body.tier, "bot");
+    assert.equal(body.score, 0);
+    assert.deepEqual(body.reasons, ["automation account"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

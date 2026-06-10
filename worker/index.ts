@@ -6562,6 +6562,7 @@ type GraphQLStargazerEdge = {
     login: string;
     avatarUrl: string;
     url: string;
+    __typename?: string;
   } | null;
 };
 
@@ -6583,6 +6584,7 @@ const repoStargazersQuery = /* GraphQL */ `
         edges {
           starredAt
           node {
+            __typename
             login
             avatarUrl
             url
@@ -6659,6 +6661,7 @@ async function recentRepoStargazersGraphql(
         login: edge.node.login,
         avatar_url: edge.node.avatarUrl,
         html_url: edge.node.url,
+        type: edge.node.__typename,
       },
     }));
 }
@@ -6801,6 +6804,7 @@ function audienceUser(
   const repos = audienceRepoSignals(insights?.repos ?? []);
   const score = calculateAudienceScore({
     login,
+    accountType: profile?.type ?? stargazer.user.type ?? null,
     followers: profile?.followers ?? 0,
     following: profile?.following ?? 0,
     publicRepos: profile?.public_repos ?? 0,
@@ -7200,6 +7204,7 @@ async function buildTrustProfile(
   }).length;
   const baseScore = calculateAudienceScore({
     login: profile.login,
+    accountType: profile.type,
     followers: profile.followers,
     following: profile.following,
     publicRepos: profile.public_repos,

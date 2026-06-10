@@ -110,6 +110,7 @@ export const gitHubStargazerSchema = v.looseObject({
     login: v.string(),
     avatar_url: v.string(),
     html_url: v.string(),
+    type: v.optional(v.string()),
   }),
 });
 

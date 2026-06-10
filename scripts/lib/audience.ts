@@ -47,6 +47,7 @@ export type AudienceScoreFactor = {
 
 export type AudienceScoreInput = {
   login: string;
+  accountType?: string | null;
   followers: number;
   following?: number;
   publicRepos: number;
@@ -136,22 +137,30 @@ const notableOrgKeywords = [
   "vercel",
 ];
 
-// Treat "bot" as a bot marker only when it is a standalone trailing token
-// (e.g. my-bot, ci.bot, gpt4bot, or exactly "bot"), not when it is the tail of
-// an ordinary human login such as cabot, talbot, or abbot. Real GitHub App
-// accounts always carry the explicit "[bot]" suffix, matched separately below.
-const BOT_SUFFIX = /(?:^|[^a-z])bot$/;
+const knownBotLoginPrefixes = ["github-actions", "dependabot", "renovate"];
+const botTokenPattern = /(?:^|[-_.])bot(?:$|[-_.])/;
 
-export function isLikelyBot(login: string): boolean {
-  const normalized = login.toLowerCase();
-  return (
-    BOT_SUFFIX.test(normalized) ||
-    normalized.endsWith("[bot]") ||
-    normalized.includes("bot-") ||
-    normalized.startsWith("github-actions") ||
-    normalized.startsWith("dependabot") ||
-    normalized.startsWith("renovate")
+// Account type comes from GitHub profile metadata when available. Login fallback
+// stays narrow; no broad "*bot" suffix guess for ambiguous human-looking names.
+function hasKnownBotLoginPrefix(normalized: string): boolean {
+  return knownBotLoginPrefixes.some(
+    (prefix) =>
+      normalized === prefix ||
+      normalized === `${prefix}bot` ||
+      normalized.startsWith(`${prefix}-`) ||
+      normalized.startsWith(`${prefix}.`) ||
+      normalized.startsWith(`${prefix}_`) ||
+      normalized.startsWith(`${prefix}[`) ||
+      normalized.startsWith(`${prefix}bot-`),
   );
+}
+
+export function isLikelyBot(login: string, accountType?: string | null): boolean {
+  const normalized = login.toLowerCase();
+  const normalizedType = accountType?.toLowerCase();
+  if (normalizedType === "bot" || normalizedType === "app") return true;
+  if (normalized.endsWith("[bot]")) return true;
+  return botTokenPattern.test(normalized) || hasKnownBotLoginPrefix(normalized);
 }
 
 function usefulText(value: string | null | undefined): string {
@@ -208,7 +217,7 @@ function factor(
 }
 
 export function calculateAudienceScore(input: AudienceScoreInput): AudienceScore {
-  if (isLikelyBot(input.login)) {
+  if (isLikelyBot(input.login, input.accountType)) {
     return {
       score: 0,
       tier: "bot",

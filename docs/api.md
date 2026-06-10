@@ -136,7 +136,7 @@ type TrustProfilePayload = {
 
 ### Score Semantics
 
-`score` is a 0-100 public-signal score. `tier` is derived from that score, except obvious automation accounts return `bot`.
+`score` is a 0-100 public-signal score. `tier` is derived from that score, except obvious automation accounts return `bot`. Bot classification prefers GitHub account metadata (`Bot` or app identities) when available, then falls back to explicit `[bot]` logins, exact `bot`, known automation prefixes such as `dependabot`, `renovate`, and `github-actions`, or separator-delimited `bot` markers such as `ci.bot` and `release-bot`. Ambiguous no-separator names such as `crawlerbot`, `robot`, or `gpt4bot` require account metadata instead of a broad `*bot` suffix guess.
 
 For `profileKind: "user_trust"`, the score describes a person/account as a public GitHub actor. For `profileKind: "org_signal"`, the score describes an organization's public footprint and credibility. These are intentionally not the same semantic label.
 

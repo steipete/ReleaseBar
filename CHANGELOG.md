@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stopped classifying human audience logins that merely end in `bot` as automation when GitHub account metadata does not identify them as bots. Thanks @devYRPauli.
 - Clarified trust score tooltips for owner, organization, contributor, and stargazer signals. Thanks @vincent-peng.
 - Made dashboard search match separate terms across repository metadata and release names. Thanks @tanish19078.
 - Kept light-mode trust panels on theme-aware surfaces instead of dark translucent backgrounds. Thanks @shubh73.

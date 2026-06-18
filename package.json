@@ -33,7 +33,7 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@types/node": "^24.13.2",
-    "oxfmt": "^0.54.0",
+    "oxfmt": "^0.55.0",
     "oxlint": "^1.69.0",
     "svelte-check": "^4.6.0",
     "typescript": "^6.0.3",

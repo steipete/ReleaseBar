@@ -6,6 +6,8 @@ ReleaseBar tracks public GitHub repository release health: latest version, relea
 
 Owner dashboards show visible public repositories immediately with lightweight repo metadata, then progressively hydrate release, commit, PR, and CI data in the background.
 
+See [VISION.md](VISION.md) for the durable product principles and boundaries behind those choices.
+
 ## Configure
 
 Edit `releasebar.config.json`:

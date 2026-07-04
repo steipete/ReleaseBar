@@ -14,6 +14,7 @@ import "./dashboard-tests/partial-dashboards.test.js";
 import "./dashboard-tests/scheduler-locks.test.js";
 import "./dashboard-tests/progress-consistency.test.js";
 import "./dashboard-tests/auth-installations.test.js";
+import "./dashboard-tests/session-refresh.test.js";
 import "./dashboard-tests/auth-ui.test.js";
 import "./dashboard-tests/app-quota.test.js";
 import "./dashboard-tests/profiles-auth-admin.test.js";

@@ -2,6 +2,9 @@ import * as v from "valibot";
 
 export const gitHubOAuthTokenSchema = v.looseObject({
   access_token: v.optional(v.string()),
+  expires_in: v.optional(v.number()),
+  refresh_token: v.optional(v.string()),
+  refresh_token_expires_in: v.optional(v.number()),
   error: v.optional(v.string()),
   error_description: v.optional(v.string()),
 });
@@ -266,6 +269,9 @@ const authInstallationSchema = v.object({
 export const storedAuthSessionSchema = v.object({
   user: authUserSchema,
   accessToken: v.string(),
+  accessTokenExp: v.optional(v.number()),
+  refreshToken: v.optional(v.string()),
+  refreshTokenExp: v.optional(v.number()),
   iat: v.number(),
   exp: v.number(),
   installations: v.optional(v.array(authInstallationSchema)),

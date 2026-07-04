@@ -106,14 +106,41 @@ export async function installationRefreshTargetInput(
   };
 }
 
+// Skip rewrites of registry entries that already hold the same content and were
+// refreshed recently, so bursts of /api/me calls (multiple tabs, browser restart)
+// stay under Workers KV's one-write-per-key-per-second limit.
+const installationRegistryRewriteMinAgeMs = 5 * 60 * 1000;
+
+async function installationRegistryEntryFresh(
+  env: Env,
+  installation: StoredInstallationRecord,
+): Promise<boolean> {
+  const existing = await readInstallationRegistry(env, installation.accountLogin).catch(() => null);
+  if (!existing) return false;
+  const updatedAt = Date.parse(existing.updatedAt ?? "");
+  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > installationRegistryRewriteMinAgeMs) {
+    return false;
+  }
+  const { updatedAt: _existingUpdatedAt, ...existingContent } = existing;
+  const { updatedAt: _nextUpdatedAt, ...nextContent } = installation;
+  return JSON.stringify(existingContent) === JSON.stringify(nextContent);
+}
+
 export async function writeInstallationRegistry(
   env: Env,
   installations: AuthInstallation[],
 ): Promise<void> {
   if (!env.DASHBOARD_CACHE) return;
   const normalized = installations.map(normalizedInstallation);
+  const stale = (
+    await Promise.all(
+      normalized.map(async (installation) =>
+        (await installationRegistryEntryFresh(env, installation)) ? null : installation,
+      ),
+    )
+  ).filter((installation): installation is StoredInstallationRecord => installation !== null);
   await Promise.all(
-    normalized.map((installation) => {
+    stale.map((installation) => {
       return env.DASHBOARD_CACHE!.put(
         installationRegistryKey(installation.accountLogin),
         JSON.stringify(installation),
@@ -122,7 +149,7 @@ export async function writeInstallationRegistry(
     }),
   );
   await Promise.all(
-    normalized
+    stale
       .filter((installation) => installation.repositorySelection === "all")
       .map(async (installation) => {
         const input = await installationRefreshTargetInput(env, installation.accountLogin);

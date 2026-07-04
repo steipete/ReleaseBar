@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.3 - Unreleased
+
 ## 0.2.2 - 2026-07-04
 
 - Kept GitHub logins alive by storing and rotating GitHub App refresh tokens, so expiring eight-hour user access tokens renew automatically instead of silently degrading until the next login.

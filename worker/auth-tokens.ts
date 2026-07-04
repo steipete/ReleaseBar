@@ -19,6 +19,7 @@ import {
   authCookie,
   cookie,
   currentSession,
+  currentSessionRecord,
   installReturnCookieValue,
   oauthStateBinding,
   oauthStateCookieName,
@@ -41,6 +42,7 @@ import {
   isAdminLogin,
   loginResponse,
   resolvedInstallations,
+  sessionAccessToken,
 } from "./auth-oauth.js";
 import {
   type AuthSession,
@@ -269,13 +271,14 @@ export async function requestInstallationToken(
   signal?: AbortSignal,
 ): Promise<RequestToken | null> {
   if (!appTokenConfigured(env)) return null;
-  const session = await currentSession(request, env);
-  if (!session) return null;
+  const record = await currentSessionRecord(request, env);
+  if (!record) return null;
+  const accessToken = await sessionAccessToken(env, record);
   const liveInstallations =
-    (await nullOnNonAbortError(githubInstallations(session.accessToken, signal))) ?? null;
+    (await nullOnNonAbortError(githubInstallations(accessToken, signal))) ?? null;
   const installations = await resolvedInstallations(
     env,
-    session,
+    record.session,
     liveInstallations,
     undefined,
     signal,
@@ -494,17 +497,23 @@ export async function callbackResponse(
       throw new Error("invalid OAuth state");
     }
     validatedState = true;
-    const accessToken = await exchangeCode(url, env);
-    const user = await githubUser(accessToken);
+    const grant = await exchangeCode(url, env);
+    const user = await githubUser(grant.accessToken);
     const now = Math.floor(Date.now() / 1000);
     const session: StoredAuthSession = {
       user,
-      accessToken,
+      accessToken: grant.accessToken,
+      ...(grant.accessTokenExp !== undefined ? { accessTokenExp: grant.accessTokenExp } : {}),
+      ...(grant.refreshToken ? { refreshToken: grant.refreshToken } : {}),
+      ...(grant.refreshTokenExp !== undefined ? { refreshTokenExp: grant.refreshTokenExp } : {}),
       iat: now,
       exp: now + sessionMaxAgeSeconds,
     };
-    const liveInstallations = await githubInstallations(accessToken).catch(() => null);
-    const installations = await resolvedInstallations(env, session, liveInstallations);
+    const liveInstallations = await githubInstallations(grant.accessToken).catch(() => null);
+    // Login must not fail because installation cache writes hit KV write limits.
+    const installations = await resolvedInstallations(env, session, liveInstallations).catch(
+      () => liveInstallations ?? [],
+    );
     if (installations.length > 0) {
       session.installations = installations;
       session.installationsUpdatedAt = new Date().toISOString();

@@ -158,6 +158,7 @@ export const sessionCookie = "rd_session";
 export const installReturnCookie = "rd_install_return";
 export const oauthStateCookiePrefix = "rd_oauth_state_";
 export const sessionMaxAgeSeconds = 30 * 24 * 60 * 60;
+export const accessTokenRefreshLeewaySeconds = 5 * 60;
 export const stateMaxAgeSeconds = 10 * 60;
 export const oauthReturnToMaxLength = 1024;
 export const buildPending = Symbol("build-pending");
@@ -341,6 +342,9 @@ export type AuthSession = {
 export type StoredAuthSession = {
   user: AuthUser;
   accessToken: string;
+  accessTokenExp?: number;
+  refreshToken?: string;
+  refreshTokenExp?: number;
   iat: number;
   exp: number;
   installations?: AuthInstallation[];

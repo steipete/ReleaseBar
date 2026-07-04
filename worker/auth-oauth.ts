@@ -16,6 +16,8 @@ import {
   gitHubOAuthTokenSchema,
   gitHubOAuthUserSchema,
   parseGitHubResponse,
+  safeJsonParse,
+  storedAuthSessionSchema,
 } from "./schemas.js";
 import * as v from "valibot";
 import type { GenericSchema, InferOutput } from "valibot";
@@ -39,6 +41,7 @@ import {
   sourceCoverage,
 } from "./auth-tokens.js";
 import {
+  accessTokenRefreshLeewaySeconds,
   installationAcknowledgementGraceMs,
   oauthReturnToMaxLength,
   type RequestToken,
@@ -56,45 +59,35 @@ export async function meResponse(request: Request, env: Env): Promise<Response> 
   const url = new URL(request.url);
   const record = await currentSessionRecord(request, env);
   const session = record?.session ?? null;
-  const liveInstallations = session
-    ? await githubInstallations(session.accessToken).catch(() => null)
-    : null;
-  const acknowledgedInstallations = session
-    ? fallbackInstallations(session, liveInstallations)
-    : [];
-  const installations = session
-    ? await resolvedInstallations(env, session, liveInstallations, acknowledgedInstallations)
-    : [];
-  if (record && liveInstallations && liveInstallations.length > 0) {
-    await writeSessionRecord(env, record.id, {
-      ...record.session,
-      installations,
-      installationsUpdatedAt:
-        acknowledgedInstallations.length > 0
-          ? record.session.installationsUpdatedAt
-          : new Date().toISOString(),
-    });
-  } else if (
-    record &&
-    installations.length > 0 &&
-    JSON.stringify(record.session.installations ?? []) !== JSON.stringify(installations)
-  ) {
-    await writeSessionRecord(env, record.id, {
-      ...record.session,
-      installations,
-      installationsUpdatedAt: new Date().toISOString(),
-    });
-  } else if (
-    record &&
-    liveInstallations &&
-    installations.length === 0 &&
-    (record.session.installations?.length ?? 0) > 0
-  ) {
-    await writeSessionRecord(env, record.id, {
-      ...record.session,
-      installations: [],
-      installationsUpdatedAt: new Date().toISOString(),
-    });
+  // A valid session must never look logged out because GitHub or ancillary KV
+  // cache writes hiccuped; fall back to the stored installation list instead.
+  let installations = session?.installations ?? [];
+  if (record && session) {
+    try {
+      const accessToken = await sessionAccessToken(env, record);
+      const liveInstallations = await githubInstallations(accessToken).catch(() => null);
+      const acknowledged = fallbackInstallations(session, liveInstallations);
+      installations = await resolvedInstallations(env, session, liveInstallations, acknowledged);
+      const changed = JSON.stringify(session.installations ?? []) !== JSON.stringify(installations);
+      if (changed && (liveInstallations !== null || installations.length > 0)) {
+        await bestEffortWriteSessionRecord(env, record.id, {
+          ...session,
+          installations,
+          installationsUpdatedAt:
+            liveInstallations && liveInstallations.length > 0 && acknowledged.length > 0
+              ? session.installationsUpdatedAt
+              : new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      installations = session.installations ?? [];
+      console.log(
+        JSON.stringify({
+          event: "auth_me_degraded",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
   }
   const coverage = session
     ? sourceCoverage(
@@ -150,7 +143,29 @@ export async function loginResponse(request: Request, env: Env): Promise<Respons
   });
 }
 
-export async function exchangeCode(url: URL, env: Env): Promise<string> {
+export type OAuthUserGrant = {
+  accessToken: string;
+  accessTokenExp?: number;
+  refreshToken?: string;
+  refreshTokenExp?: number;
+};
+
+function oauthUserGrant(
+  token: v.InferOutput<typeof gitHubOAuthTokenSchema>,
+): OAuthUserGrant | null {
+  if (!token.access_token) return null;
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    accessToken: token.access_token,
+    ...(token.expires_in ? { accessTokenExp: now + token.expires_in } : {}),
+    ...(token.refresh_token ? { refreshToken: token.refresh_token } : {}),
+    ...(token.refresh_token && token.refresh_token_expires_in
+      ? { refreshTokenExp: now + token.refresh_token_expires_in }
+      : {}),
+  };
+}
+
+export async function exchangeCode(url: URL, env: Env): Promise<OAuthUserGrant> {
   const code = url.searchParams.get("code");
   if (!code) throw new Error("missing OAuth code");
   const response = await workerFetch("https://github.com/login/oauth/access_token", {
@@ -167,10 +182,37 @@ export async function exchangeCode(url: URL, env: Env): Promise<string> {
     }),
   });
   const token = parseGitHubResponse(gitHubOAuthTokenSchema, await response.json(), "oauth token");
-  if (!response.ok || !token.access_token) {
+  const grant = oauthUserGrant(token);
+  if (!response.ok || !grant) {
     throw new Error(token.error_description || token.error || "GitHub OAuth exchange failed");
   }
-  return token.access_token;
+  return grant;
+}
+
+export async function refreshedUserGrant(
+  env: Env,
+  refreshToken: string,
+): Promise<OAuthUserGrant | null> {
+  const response = await workerFetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      client_id: env.GITHUB_APP_CLIENT_ID,
+      client_secret: env.GITHUB_APP_CLIENT_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+  if (!response.ok) return null;
+  const token = parseGitHubResponse(
+    gitHubOAuthTokenSchema,
+    await response.json(),
+    "oauth refresh token",
+  );
+  return oauthUserGrant(token);
 }
 
 export async function githubUser(accessToken: string): Promise<AuthUser> {
@@ -605,10 +647,95 @@ export async function writeSessionRecord(
   session: StoredAuthSession,
 ): Promise<void> {
   if (!id || !env.DASHBOARD_CACHE) return;
-  const ttl = Math.max(1, session.exp - Math.floor(Date.now() / 1000));
+  // KV rejects expirationTtl below 60s; a session that close to expiry is not worth rewriting.
+  const ttl = session.exp - Math.floor(Date.now() / 1000);
+  if (ttl < 60) return;
   await env.DASHBOARD_CACHE.put(`auth:session:${id}`, JSON.stringify(session), {
     expirationTtl: ttl,
   });
+}
+
+// KV allows only one write per key per second; concurrent /api/me calls (e.g. a browser
+// restart reopening several tabs) must not turn a failed rewrite into a logged-out response.
+export async function bestEffortWriteSessionRecord(
+  env: Env,
+  id: string | null,
+  session: StoredAuthSession,
+): Promise<void> {
+  try {
+    await writeSessionRecord(env, id, session);
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        event: "auth_session_write_failed",
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+async function readStoredSession(env: Env, id: string): Promise<StoredAuthSession | null> {
+  const stored = await env.DASHBOARD_CACHE?.get(`auth:session:${id}`);
+  if (!stored) return null;
+  return safeJsonParse(storedAuthSessionSchema, stored, "auth session");
+}
+
+// Refresh tokens are single-use: once GitHub rotates a grant, losing the KV write would
+// strand the stored session on a spent refresh token. Retry past the 1-write/sec/key limit.
+async function persistRotatedSession(
+  env: Env,
+  id: string | null,
+  session: StoredAuthSession,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await writeSessionRecord(env, id, session);
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        console.log(
+          JSON.stringify({
+            event: "auth_session_rotation_write_failed",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1100 * (attempt + 1)));
+    }
+  }
+}
+
+export async function sessionAccessToken(
+  env: Env,
+  record: { id: string | null; session: StoredAuthSession },
+): Promise<string> {
+  const session = record.session;
+  const now = Math.floor(Date.now() / 1000);
+  if (!session.accessTokenExp || session.accessTokenExp - now > accessTokenRefreshLeewaySeconds) {
+    return session.accessToken;
+  }
+  if (
+    !session.refreshToken ||
+    (session.refreshTokenExp !== undefined && session.refreshTokenExp <= now)
+  ) {
+    return session.accessToken;
+  }
+  const grant = await refreshedUserGrant(env, session.refreshToken).catch(() => null);
+  if (!grant) {
+    // Refresh tokens are single-use: a parallel request may have rotated first. Pick up its result.
+    const latest = record.id ? await readStoredSession(env, record.id) : null;
+    if (latest && latest.accessToken !== session.accessToken) {
+      Object.assign(session, latest);
+    }
+    return session.accessToken;
+  }
+  session.accessToken = grant.accessToken;
+  session.accessTokenExp = grant.accessTokenExp;
+  if (grant.refreshToken) session.refreshToken = grant.refreshToken;
+  if (grant.refreshTokenExp) session.refreshTokenExp = grant.refreshTokenExp;
+  await persistRotatedSession(env, record.id, session);
+  return session.accessToken;
 }
 
 export async function acknowledgedInstallations(
@@ -629,7 +756,8 @@ export async function acknowledgedInstallations(
     }
     return [];
   }
-  const liveInstallations = await githubInstallations(record.session.accessToken).catch(() => []);
+  const accessToken = await sessionAccessToken(env, record);
+  const liveInstallations = await githubInstallations(accessToken).catch(() => []);
   if (
     installationId &&
     !liveInstallations.some((installation) => installation.id === installationId)
@@ -644,7 +772,7 @@ export async function acknowledgedInstallations(
     ...acknowledged,
   ]);
   await writeInstallationRegistry(env, installations);
-  await writeSessionRecord(env, record.id, {
+  await bestEffortWriteSessionRecord(env, record.id, {
     ...record.session,
     installations,
     installationsUpdatedAt: new Date().toISOString(),

@@ -1,6 +1,6 @@
 {
   "name": "releasebar",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Release freshness dashboard for open source maintainers.",
   "type": "module",

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 - Unreleased
+## 0.2.2 - 2026-07-04
 
 - Kept GitHub logins alive by storing and rotating GitHub App refresh tokens, so expiring eight-hour user access tokens renew automatically instead of silently degrading until the next login.
 - Stopped `/api/me` from rewriting the stored session and installation caches on every request and made those cache writes best-effort, so concurrent tabs (for example after a browser restart) no longer trip Workers KV write limits and render a logged-in user as logged out.

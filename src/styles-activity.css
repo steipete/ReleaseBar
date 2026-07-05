@@ -127,7 +127,9 @@
 .range-toggle a.active {
   border-color: var(--green);
   background: rgba(156, 255, 87, 0.075);
-  color: var(--text);
+  color: var(--green);
+  font-weight: 700;
+  box-shadow: 0 0 14px var(--glow-soft);
 }
 
 .activity-text {
@@ -554,7 +556,9 @@
 .activity-overview-metrics strong {
   color: var(--green);
   font-size: clamp(20px, 2.4vw, 30px);
+  font-weight: 700;
   line-height: 1;
+  text-shadow: 0 0 28px var(--title-glow);
 }
 
 .activity-overview-metrics span {
@@ -803,7 +807,9 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--panel) 86%, transparent);
-  box-shadow: var(--shadow);
+  box-shadow:
+    var(--shadow),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
   overflow: hidden;
 }
 
@@ -814,6 +820,12 @@
   min-height: 64px;
   padding: 0 18px;
   border-bottom: 1px solid var(--line);
+  caret-color: var(--green);
+}
+
+.prompt .mark {
+  font-weight: 700;
+  text-shadow: 0 0 14px var(--title-glow);
 }
 
 .quick-jump {
@@ -895,15 +907,19 @@ input::placeholder {
 
 .metrics span {
   display: block;
-  font-size: 30px;
   color: var(--green);
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 28px var(--title-glow);
 }
 
 .metrics small {
   display: block;
-  margin-top: 6px;
+  margin-top: 8px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
 .metric-action {
@@ -921,6 +937,10 @@ input::placeholder {
   background: rgba(156, 255, 87, 0.045);
   color: inherit;
   outline: 0;
+}
+
+.metrics .metric-action.active {
+  box-shadow: inset 0 -2px 0 var(--green);
 }
 
 .metric-action:hover small,

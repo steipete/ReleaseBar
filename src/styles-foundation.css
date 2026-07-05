@@ -6,11 +6,12 @@
   --panel: #10130f;
   --panel-2: #151914;
   --panel-menu: #0d100c;
-  --text: #e8f4df;
-  --muted: #899180;
-  --line: #293126;
-  --line-strong: #33402d;
+  --text: #e9f4e1;
+  --muted: #8f9b85;
+  --line: #2a3226;
+  --line-strong: #3a4833;
   --green: #9cff57;
+  --green-strong: #c8ff8f;
   --cyan: #63d8ff;
   --amber: #ffcc66;
   --red: #ff6b6b;
@@ -19,6 +20,9 @@
   --grid-line: rgba(156, 255, 87, 0.04);
   --grid-line-soft: rgba(156, 255, 87, 0.025);
   --hero-glow: rgba(99, 216, 255, 0.12);
+  --title-glow: rgba(156, 255, 87, 0.16);
+  --scanline: rgba(0, 0, 0, 0.07);
+  --glow-soft: rgba(156, 255, 87, 0.1);
   --mobile-project-bg: rgba(16, 19, 15, 0.38);
   --mobile-project-cell: color-mix(in srgb, var(--panel) 84%, transparent);
 
@@ -29,21 +33,24 @@
   --account-button-width: min(168px, var(--account-max-width));
   --shadow: 0 18px 80px rgba(0, 0, 0, 0.45);
 
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #f7f5ee;
-  --panel: #fffdf8;
+  --bg: #f6f4ea;
+  --panel: #fffefa;
   --panel-2: #efede2;
-  --panel-menu: #fffdf8;
-  --text: #202216;
-  --muted: #687061;
-  --line: #ddd7c8;
-  --line-strong: #bdb5a3;
+  --panel-menu: #fffefa;
+  --text: #1e2114;
+  --muted: #656d5c;
+  --line: #dcd6c5;
+  --line-strong: #b7ae99;
   --green: #2f8f20;
+  --green-strong: #1f6b14;
   --cyan: #1f7890;
   --amber: #9a6400;
   --red: #bf413a;
@@ -52,8 +59,11 @@
   --grid-line: rgba(47, 143, 32, 0.045);
   --grid-line-soft: rgba(47, 143, 32, 0.028);
   --hero-glow: rgba(31, 120, 144, 0.055);
+  --title-glow: transparent;
+  --scanline: transparent;
+  --glow-soft: rgba(47, 143, 32, 0.08);
   --mobile-project-bg: #e6e0d1;
-  --mobile-project-cell: #fffdf8;
+  --mobile-project-cell: #fffefa;
 
   --shadow: 0 18px 60px rgba(20, 30, 18, 0.12);
 }
@@ -71,13 +81,28 @@ body {
   background:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line-soft) 1px, transparent 1px),
-    radial-gradient(circle at top left, var(--hero-glow), transparent 36rem), var(--bg);
+    radial-gradient(circle at top left, var(--hero-glow), transparent 36rem),
+    radial-gradient(ellipse 120% 60% at 50% -10%, rgba(156, 255, 87, 0.03), transparent), var(--bg);
   background-size:
     34px 34px,
     34px 34px,
     auto,
+    auto,
     auto;
   color: var(--text);
+  font-feature-settings: "calt" 1;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CRT scanlines: fixed overlay, transparent in light theme */
+body::after {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: repeating-linear-gradient(0deg, var(--scanline) 0 1px, transparent 1px 4px);
+  content: "";
+  pointer-events: none;
 }
 
 a {
@@ -87,6 +112,26 @@ a {
 
 a:hover {
   color: var(--green);
+}
+
+/* Type rhythm: shared treatment for uppercase micro-labels */
+.eyebrow,
+.loading-kicker,
+.panel-kicker,
+.partial-state span,
+.release-group-label,
+.activity-kind,
+.attention-reasons span,
+.table-head,
+.metrics small,
+.activity-stats small,
+.activity-overview-metrics span,
+.activity-event-details summary,
+.audience-tier,
+.trust-summary span,
+.trust-dimensions small {
+  font-weight: 500;
+  letter-spacing: 0.1em;
 }
 
 .shell {
@@ -147,7 +192,7 @@ a:hover {
   margin: 14px 0 0;
   color: var(--muted);
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .subtitle-link {
@@ -214,12 +259,13 @@ a:hover {
   align-items: center;
   gap: 5px;
   color: var(--green);
-  font-size: 13px;
-  letter-spacing: 0;
+  font-size: 12px;
   text-transform: uppercase;
 }
 
 .eyebrow.brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: none;
 }
 
@@ -241,8 +287,10 @@ h1 {
   min-width: 0;
   margin: 0;
   font-size: clamp(24px, 3.6vw, 51px);
+  font-weight: 800;
   line-height: 1;
-  letter-spacing: 0;
+  letter-spacing: -0.02em;
+  text-shadow: 0 0 42px var(--title-glow);
 }
 
 .hero-owner-title {
@@ -443,6 +491,26 @@ h1 {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 18px var(--green);
+  animation: status-pulse 2.6s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 18px var(--green);
+    opacity: 1;
+  }
+
+  50% {
+    box-shadow: 0 0 6px var(--green);
+    opacity: 0.72;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
 }
 
 .discover-nav {
@@ -480,4 +548,7 @@ h1 {
 
 .discover-group a.active {
   background: rgba(156, 255, 87, 0.075);
+  color: var(--green);
+  font-weight: 700;
+  box-shadow: 0 0 14px var(--glow-soft);
 }

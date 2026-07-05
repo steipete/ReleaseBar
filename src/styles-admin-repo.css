@@ -238,8 +238,11 @@
     var(--detail-value-size, 42px),
     var(--detail-fit-size, 42px)
   );
+  font-weight: 700;
+  letter-spacing: -0.01em;
   line-height: 1;
   text-overflow: ellipsis;
+  text-shadow: 0 0 34px var(--title-glow);
   white-space: nowrap;
 }
 
@@ -262,6 +265,8 @@
   margin: 5px 0 0;
   color: var(--text);
   font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   line-height: 1.1;
 }
 

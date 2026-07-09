@@ -31,7 +31,7 @@
     "valibot": "^1.4.2"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@types/node": "^26.1.0",
     "oxfmt": "^0.57.0",
     "oxlint": "^1.72.0",

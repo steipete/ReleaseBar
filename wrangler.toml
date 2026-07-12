@@ -1,6 +1,6 @@
 name = "releasedeck-api"
 main = "node_modules/.cache/releasebar-build/worker/index.js"
-compatibility_date = "2026-06-12"
+compatibility_date = "2026-07-11"
 account_id = "de09342a728de2c25c85cc6b34d68739"
 workers_dev = true
 

@@ -3,6 +3,7 @@
 ## 0.2.3 - Unreleased
 
 - Refreshed the dashboard design: the UI now ships JetBrains Mono (previously only used for social cards), uppercase micro-labels gained consistent letterspaced styling, dashboard rows show a freshness-colored edge bar and a freshness-tinted state tag, missing commit counts render quietly instead of as large red `n/a`, active filters/periods glow green, big numerals got heavier weights with a subtle phosphor glow, dark mode gained faint CRT scanlines, and the light theme received matching contrast and polish.
+- Refreshed the Cloudflare Workers compatibility date after verifying the newly enabled TLS option validation does not affect ReleaseBar.
 
 ## 0.2.2 - 2026-07-04
 

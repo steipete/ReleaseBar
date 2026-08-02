@@ -492,7 +492,7 @@ test("worker serves OpenAPI spec aliases for Swagger tooling", async () => {
       };
     };
     assert.equal(body.openapi, "3.1.0");
-    assert.equal(body.info?.version, "0.2.0");
+    assert.equal(body.info?.version, "0.2.3");
     assert.ok(body.paths?.["/api/{owner}/activity"]);
     assert.ok(body.paths?.["/api/users/{login}/trust"]);
     assert.ok(body.paths?.["/api/repos/{owner}/{repo}/audience"]);

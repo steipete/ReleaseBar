@@ -70,7 +70,7 @@ export function openApiSpec(origin: string): Record<string, unknown> {
     openapi: "3.1.0",
     info: {
       title: "ReleaseBar Public API",
-      version: "0.2.0",
+      version: "0.2.3",
       description:
         "Cached public GitHub release, people trust, org signal, and stargazer audience context for dashboards and PR-triage agents.",
     },

@@ -1,136 +1,79 @@
-# 📦 ReleaseBar
+# ReleaseBar 📦 — Know what needs a release.
 
-Release freshness dashboard for public GitHub users and orgs.
+[![CI](https://img.shields.io/github/actions/workflow/status/steipete/ReleaseBar/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/steipete/ReleaseBar/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/steipete/ReleaseBar?style=flat-square&label=release)](https://github.com/steipete/ReleaseBar/releases/latest)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.12-339933?style=flat-square&logo=node.js&logoColor=white)](package.json)
+[![License](https://img.shields.io/github/license/steipete/ReleaseBar?style=flat-square)](LICENSE)
+[![Live](https://img.shields.io/badge/live-release.bar-6fda44?style=flat-square)](https://release.bar)
 
-ReleaseBar tracks public GitHub repository release health: latest version, release date, commits since release, activity, stars, language, topics, open work, CI status, and recent stargazer audience signals. It serves cached dashboards for routes like `https://release.bar/steipete`, `https://release.bar/openclaw`, and `https://release.bar/microsoft`.
+ReleaseBar is a release-freshness dashboard for public GitHub users and organizations. It combines releases, unreleased commits, repository activity, CI, and open work so maintainers can see which projects need attention.
 
-Owner dashboards show visible public repositories immediately with lightweight repo metadata, then progressively hydrate release, commit, PR, and CI data in the background.
+## Install
 
-See [VISION.md](VISION.md) for the durable product principles and boundaries behind those choices.
+The public service runs at [release.bar](https://release.bar), with no installation required.
 
-## Configure
-
-Edit `releasebar.config.json`:
-
-- `owners`: GitHub users or orgs to scan
-- `includeForks`: include forked repositories
-- `includeArchived`: include archived repositories
-- `includeUnreleased`: include repositories without GitHub releases in static builds
-- `excludeRepos`: full `owner/name` entries to hide
-- `canonicalDomain`: primary public dashboard domain
-
-## Build
+To run the source locally:
 
 ```sh
-npm run build
+git clone https://github.com/steipete/ReleaseBar.git
+cd ReleaseBar
+npm ci
 ```
 
-Set `GITHUB_TOKEN` for higher API limits. GitHub Actions uses the built-in token. Static builds read `releasebar.config.json`; the public service reads owner routes through the Worker API.
+ReleaseBar requires Node.js 22.12 or newer. Node.js 24 is the version used by CI.
 
-## Generic Dashboards
+## Quick start
 
-- `/` loads `ReleaseBar Hot`, a cached board built from recently requested public dashboards
-- `/:owner` loads the Worker API for that owner
-- `/:owner/activity` groups day, week, or month public work by repository, ranked by activity volume, with AI summaries and contributor forks of profile-owned repositories omitted when GitHub identifies them
-- query options: `forks=true`, `archived=true`, `unreleased=false`
-- add public sources with `owners=openclaw,steipete` or `repos=owner/name`
-- the settings panel can add public users, orgs, or explicit repos to the current URL
-- signed-in dashboard owners can save added public sources and local visibility as the public default for their clean owner route
-- custom URLs are capped at 8 added public sources
-- settings can hide visible owners or repos locally without changing the shared cache
-- GitHub App login uses `/api/auth/login`, `/api/auth/callback`, `/api/auth/install`, `/api/auth/logout`, and `/api/me`
-- `Log in with GitHub` signs the user in, detects existing GitHub App installations, and only offers installation when the current dashboard source is not covered
-- GitHub App installation gives ReleaseBar dedicated GitHub API quota for the selected account/repositories; public unsynced dashboards stay metadata-only and skip release hydration
-- repository audience backfill is GitHub App-only and warms bounded week/month stargazer trust caches for covered repositories
-- once an account installation is known, public refreshes for that account can use its app quota even for anonymous viewers; mixed-owner dashboards partition work across each source account's installation instead of forcing the whole dashboard onto shared quota
-- successful login or installation immediately queues a bounded public owner-dashboard warm for each all-repository installation when its shared cache is missing, stale, or incomplete
-- private repositories are ignored even when selected in GitHub App installation; ReleaseBar only stores and renders public repository metadata
-- the need-attention metric filters repos with unreleased commits, stale releases, failing/cancelled CI, or issue/PR pressure and rows show the reason inline
-- owner pages show bounded people trust or org signal profiles with GitHub age, reach, footprint, safety dimensions, weighted score factors, and recent repository evidence
-- repository detail pages include release cadence, recent releases, contributors, languages, commit/churn charts, recent public stargazer audience signals, and 30-day issue/PR trend counts when GitHub provides them
-- repository detail pages can show an AI summary of commit titles since the latest release when the Worker has an OpenAI API key
-
-## API And Cache
-
-The Worker in `worker/index.ts` serves both the static app shell and the generic owner API. See [docs/api.md](docs/api.md) for the public REST contract, response shapes, cache semantics, and agent PR-triage guidance.
-
-- `GET /api/:owner` returns a cached dashboard for a public GitHub user or org
-- `GET /api/:owner/events` streams cache updates for progressive rebuilds
-- `GET /api/:owner/activity?range=day|week|month` returns ranked, grouped public activity and cached AI summaries
-- `GET /api/users/:login/trust` returns cached public people trust or organization signal scoring, account age, score dimensions, and weighted score factors for one GitHub profile
-- `GET /api/repos/:owner/:repo` returns repository detail stats
-- `GET /api/repos/:owner/:repo/audience?range=week|month` returns cached recent stargazer scoring from public GitHub profile fields
-- `POST /api/repos/:owner/:repo/audience/backfill` warms bounded week/month stargazer trust caches with GitHub App quota only
-- `GET /openapi.json`, `GET /api/openapi.json`, and `GET /api/swagger.json` expose the public API as Swagger-compatible OpenAPI 3.1 JSON
-- `GET /api/_discover` and `GET /api/_hot` power the root dashboard
-
-Dashboard builds validate public GitHub owners and scan up to the 200 most recently pushed public repositories per owner. Shared owner metadata snapshots feed every dashboard filter/release variant. Active owners get a lean issue/PR/archive GraphQL refresh about every 15 minutes, while release and CI hydration stays on the roughly six-hour dashboard cadence. Cold dashboards return lightweight repository metadata before release hydration continues through Cloudflare Queue in 12-repository batches, with up to four repositories hydrated concurrently inside each batch. Anonymous REST fallbacks leave split counts unavailable instead of spending one extra request per repository. Unsynced public dashboards show bounded repository metadata without release, compare, commit, or check-run calls. Dashboard payloads expose separate `countsUpdatedAt`, `releasesUpdatedAt`, and `ciUpdatedAt` cache timestamps. Dashboard payloads, owner snapshots, repo fragments, hot boards, app-installation coverage, profile settings, and auth session data live in Cloudflare KV. A Durable Object binding (`DASHBOARD_LOCKS`) prevents repeated cold requests from stampeding GitHub and stores strongly consistent progressive-scan checkpoints, active-job reservations, and refresh-target failure state between rapid Queue deliveries.
-
-Fresh dashboard cache is served for about 1h. Stale or partial cache is shown while a background rebuild continues, so large owners can show useful rows before all release data finishes. Dashboard records are retained longer than the fresh window so older public data can remain visible during GitHub outages or rate limits, with the UI marking stale/partial state.
-
-`GITHUB_TOKEN` is the shared fallback bucket for sources without GitHub App coverage. Repository detail caches use conditional ETag revalidation, concurrent cold requests share one build, and signed webhooks evict repository-scoped cache fragments. When the shared core or GraphQL bucket falls below 2,000 remaining requests, nonessential contributor, language, stats, and work-trend enrichment is deferred. Below 1,000 remaining requests, uncached repository detail becomes cache-only until reset; installed accounts continue on their independent App buckets.
-
-The Worker writes structured `github_token_use` and `github_installation_token` logs without token values. Use Cloudflare Worker tail/logs to audit which area, route, quota source, account, status, and remaining rate-limit bucket handled public GitHub requests.
-
-### GitHub App Login
-
-Configure these Worker secrets before enabling login:
-
-- `GITHUB_APP_CLIENT_ID`
-- `GITHUB_APP_CLIENT_SECRET`
-- `GITHUB_APP_ID`
-- `GITHUB_APP_PRIVATE_KEY`
-- `GITHUB_WEBHOOK_SECRET`
-- `AUTH_COOKIE_SECRET`
-
-`GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` are required for dedicated GitHub App quota. Without them, users can still sign in, but dashboard rebuilds use the shared server token/cache. Optional: `GITHUB_APP_SLUG` defaults to `releasebar-app`, the current GitHub App slug.
-
-Set the GitHub App setup URL to `https://release.bar/api/auth/install` and enable redirect-on-update so users return to their dashboard after installing or changing repository access.
-
-Set the GitHub App webhook URL to `https://release.bar/api/github/webhook`, use the same value as the `GITHUB_WEBHOOK_SECRET` Worker secret, and subscribe to `Issues`, `Pull requests`, `Push`, `Releases`, and `Repository` events. Signed deliveries up to 2 MiB enter Cloudflare Queue before acknowledgement. Per-owner Durable Objects coalesce issue/PR bursts into one authoritative repository-count refresh and push/release bursts into one release refresh; repository privacy and archive transitions remain distinct and use repository observation clocks. Up to 25 recently viewed matching candidates from the available target indexes enter an immediate batch; fanout waits for that batch to drain, capped at two minutes, before the remaining recent variants follow through a stable key-ordered sweep. Older variants refresh on demand.
-
-### AI Release Summaries
-
-Configure `OPENAI_API_KEY` as a Worker secret to summarize recent public activity and commit titles since the latest release. Optional: `OPENAI_SUMMARY_MODEL` defaults to `chat-latest`, OpenAI's GPT-5.5 Instant API alias.
+Open a dashboard for any public GitHub owner, such as [release.bar/steipete](https://release.bar/steipete), or read the same cached data from the API:
 
 ```sh
-wrangler secret put OPENAI_API_KEY
+curl -fsSL https://release.bar/api/steipete \
+  | jq '{owners: [.owners[].login], repositories: (.projects | length), cache: .cache.state}'
 ```
 
-Summaries are generated server-side through the OpenAI Responses API without an explicit reasoning option. Owner activity uses one compact structured request for the overall summary and up to 30 repository summaries, with a repository-aware output ceiling and a compatibility floor for configurable reasoning models. Release summaries are cached by repository, release tag, default-branch head SHA, model, and prompt version; activity summaries also refresh when the configured model changes.
+The response may initially report `partial` or `stale` while deeper release and CI data hydrates in the background.
 
-## Local Real-Data Testing
+## Dashboards
 
-Use Wrangler remote dev when you need local code with real Cloudflare execution, GitHub App secrets, and OpenAI/GitHub tokens:
+| Route              | Shows                                                                                   |
+| ------------------ | --------------------------------------------------------------------------------------- |
+| `/`                | Recently requested public dashboards                                                    |
+| `/:owner`          | Release health for one GitHub user or organization                                      |
+| `/:owner/activity` | Day, week, or month public activity grouped by repository                               |
+| `/:owner/:repo`    | Release cadence, contributors, languages, churn, open work, and recent audience signals |
+
+Dashboard settings can add public owners, organizations, or explicit repositories to the current URL. Query parameters cover shareable filters such as `forks=true`, `archived=true`, `unreleased=false`, `owners=openclaw,steipete`, and `repos=owner/name`.
+
+See the [product guide](docs/product-guide.md) for login, GitHub App, filtering, attention, trust, and repository-detail behavior.
+
+## Freshness and public data
+
+Owner dashboards return lightweight public repository metadata first, then hydrate release, commit, pull-request, and CI data in bounded background batches. Cached data remains visible during GitHub outages or rate limits, and each payload reports whether its data is fresh, stale, partial, warming, or errored.
+
+ReleaseBar ignores private repositories even when a GitHub App installation includes them. Installing the app supplies dedicated GitHub API quota for covered public sources; it does not turn ReleaseBar into a private-repository browser or a GitHub write proxy.
+
+## API
+
+The Worker exposes cached public endpoints for owner dashboards, activity, repository details, audience signals, and public GitHub profile context. Swagger-compatible OpenAPI 3.1 is available at [`/openapi.json`](https://release.bar/openapi.json).
+
+See the [public API reference](docs/api.md) for response shapes, cache semantics, and agent guidance. The [refresh scheduler](docs/refresh-scheduler.md) describes background hydration, retries, quota selection, and webhook-driven refreshes.
+
+## Self-hosting
+
+Static builds use `releasebar.config.json`; the hosted service serves arbitrary public owner routes through the Cloudflare Worker API. See [Self-hosting and operations](docs/self-hosting.md) for configuration, local Worker modes, GitHub App setup, optional AI summaries, Cloudflare bindings, and deployment checks.
+
+## Development
 
 ```sh
-npm run dev:worker:real
-```
-
-Open `http://localhost:8787/steipete` or any other route. This runs the current checkout on Cloudflare, so cold dashboards can use the same GitHub App credentials and real API paths as `release.bar`.
-
-For frontend hot reload, run both processes:
-
-```sh
+npm ci
+npm run check:static
 npm run dev
-npm run dev:worker:real
 ```
 
-The Vite app falls back to `http://127.0.0.1:8787` for API calls. `npm run dev:worker` stays fully local and is useful for UI shape and tests, but it does not have production secrets unless you provide local `.dev.vars`.
+The Vite development server runs on `http://127.0.0.1:5173`. Run `npm run dev:worker` alongside it when testing Worker API routes locally.
 
-Because `wrangler.toml` defines a KV `preview_id`, remote dev uses the preview KV namespace instead of the production cache. It can fetch real data and warm that preview cache without mutating the live `release.bar` cache.
+Product direction and boundaries live in [VISION.md](VISION.md).
 
-## Deploy
+## License
 
-The combined app/API Worker deploys with Wrangler through `.github/workflows/deploy.yml` on pushes to `main`:
-
-```sh
-npm run build
-wrangler deploy
-```
-
-`wrangler.toml` binds `dist` as Worker static assets, `DASHBOARD_CACHE` as KV, and `DASHBOARD_LOCKS` as the Durable Object single-flight lock. The Worker runs first so `/api/*` stays dynamic and owner routes like `/openclaw` return the app shell with HTTP 200. Deploy CI smokes the root page, an owner page, a repository detail page, the discovery API, and live JS/CSS asset hashes after Wrangler deploys.
-
-`.github/workflows/monitor.yml` repeats the production route, discovery API, and live asset smoke checks every six hours without redeploying unchanged code.
-
-The deployed Worker service is still named `releasedeck-api` in Cloudflare for continuity. The canonical product, repo, package, and config names are ReleaseBar / `releasebar`.
+MIT. See [LICENSE](LICENSE).

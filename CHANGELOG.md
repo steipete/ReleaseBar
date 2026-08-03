@@ -2,6 +2,8 @@
 
 ## 0.2.4 - Unreleased
 
+- Reworked the README into a concise product and quick-start guide, with detailed behavior and self-hosting operations moved into focused docs.
+
 ## 0.2.3 - 2026-08-01
 
 - Refreshed the dashboard design: the UI now ships JetBrains Mono (previously only used for social cards), uppercase micro-labels gained consistent letterspaced styling, dashboard rows show a freshness-colored edge bar and a freshness-tinted state tag, missing commit counts render quietly instead of as large red `n/a`, active filters/periods glow green, big numerals got heavier weights with a subtle phosphor glow, dark mode gained faint CRT scanlines, and the light theme received matching contrast and polish.

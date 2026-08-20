@@ -34,7 +34,7 @@
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@types/node": "^26.2.0",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "oxfmt": "^0.62.0",
+    "oxfmt": "^0.63.0",
     "oxlint": "^1.78.0",
     "svelte-check": "^4.7.5",
     "typescript": "npm:@typescript/typescript6@^6.0.2",

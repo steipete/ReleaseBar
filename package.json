@@ -26,7 +26,7 @@
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@resvg/resvg-wasm": "^2.6.2",
     "bits-ui": "^2.19.0",
-    "svelte": "^5.56.10",
+    "svelte": "^5.57.0",
     "svelte-command-palette": "^2.0.2",
     "valibot": "^1.4.2"
   },

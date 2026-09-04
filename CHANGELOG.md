@@ -2,6 +2,7 @@
 
 ## 0.2.4 - Unreleased
 
+- Updated Oxfmt, Oxlint, and Node.js type definitions, and refreshed compatible transitive dependencies.
 - Updated Svelte to 5.57 with upstream rendering and reactivity fixes.
 - Updated Bits UI, Vite, Node.js type definitions, Oxfmt, and Oxlint, and refreshed compatible transitive dependencies.
 - Reworked the README into a concise product and quick-start guide, with detailed behavior and self-hosting operations moved into focused docs.

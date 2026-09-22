@@ -1,13 +1,15 @@
 # Changelog
 
-## 0.2.4 - Unreleased
+## Unreleased
+
+## 0.2.4 - 2026-09-22
+
+**Highlights:** Malformed URLs no longer crash requests, and updated UI dependencies improve accessibility and rendering reliability.
 
 - Reject malformed URL path encoding with a non-cacheable HTTP 400 instead of crashing page, API, and social-card requests; share page route parsing between the browser and Worker.
-- Updated Bits UI, Svelte, and Valibot with upstream accessibility, event cleanup, reactivity, and validation fixes, alongside compatible build-tool updates.
-- Updated Oxfmt, Oxlint, and Node.js type definitions, and refreshed compatible transitive dependencies.
-- Updated Svelte to 5.57 with upstream rendering and reactivity fixes.
-- Updated Bits UI, Vite, Node.js type definitions, Oxfmt, and Oxlint, and refreshed compatible transitive dependencies.
+- Updated Bits UI, Svelte, and Valibot with upstream accessibility, event cleanup, rendering, reactivity, and validation fixes.
 - Reworked the README into a concise product and quick-start guide, with detailed behavior and self-hosting operations moved into focused docs.
+- Updated Vite, Oxfmt, Oxlint, and Node.js type definitions, and refreshed compatible transitive dependencies.
 
 ## 0.2.3 - 2026-08-01
 

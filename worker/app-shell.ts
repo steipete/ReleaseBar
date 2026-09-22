@@ -4,6 +4,7 @@ import {
   validOwnerSlug,
   validRepoSlug,
 } from "../scripts/lib/dashboard.js";
+import { ownerActivityFromPath, repoFromPath } from "../src/routing.js";
 import type {
   ApiQuota,
   AuthPayload,
@@ -235,31 +236,11 @@ export async function writeCachedOwner(env: Env, owner: Owner): Promise<void> {
 }
 
 export function repoFullNameFromPath(pathname: string): string | null {
-  const parts = pathname
-    .split("/")
-    .filter(Boolean)
-    .map((part) => decodeURIComponent(part));
-  const escaped = parts[0] === "-";
-  if ((!escaped && parts.length !== 2) || (escaped && parts.length !== 3)) return null;
-  const owner = slugOwner(escaped ? (parts[1] ?? "") : (parts[0] ?? ""));
-  const repo = (escaped ? (parts[2] ?? "") : (parts[1] ?? "")).trim().toLowerCase();
-  const fullName = `${owner}/${repo}`;
-  if (!escaped && repo === "activity") return null;
-  return validRepoSlug(fullName) ? fullName : null;
+  return repoFromPath(pathname)?.fullName ?? null;
 }
 
 export function ownerActivityPageOwner(pathname: string): string | null {
-  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  const escaped = parts[0] === "-" && parts[1]?.toLowerCase() === "owners";
-  if (
-    (!escaped && (parts.length !== 2 || parts[1]?.toLowerCase() !== "activity")) ||
-    (escaped && (parts.length !== 4 || parts[3]?.toLowerCase() !== "activity"))
-  ) {
-    return null;
-  }
-  const owner = slugOwner((escaped ? parts[2] : parts[0]) ?? "");
-  if (!escaped && (owner === "api" || owner === "og")) return null;
-  return validOwnerSlug(owner) ? owner : null;
+  return ownerActivityFromPath(pathname)?.owner ?? null;
 }
 
 export function ownerFromPagePath(pathname: string): string | null {

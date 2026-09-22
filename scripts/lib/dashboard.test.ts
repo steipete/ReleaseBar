@@ -1,5 +1,6 @@
 import "./dashboard-tests/browser-audit.test.js";
 import "./dashboard-tests/routing-view.test.js";
+import "./dashboard-tests/route-encoding.test.js";
 import "./dashboard-tests/hot-dashboard-shell.test.js";
 import "./dashboard-tests/app-shell-caches.test.js";
 import "./dashboard-tests/repo-detail-core.test.js";

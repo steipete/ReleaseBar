@@ -70,12 +70,21 @@ export function fallbackApiOrigin(currentLocation = currentRouteLocation()): str
   return workersDevApiOrigin;
 }
 
+export function decodedPathParts(pathname: string): string[] | null {
+  try {
+    return pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch (error) {
+    if (error instanceof URIError) return null;
+    throw error;
+  }
+}
+
 export function ownerFromPath(pathname: string): string | null {
-  const [first] = pathname.split("/").filter(Boolean);
+  const first = decodedPathParts(pathname)?.[0];
   if (!first || first === "index.html") {
     return null;
   }
-  const owner = decodeURIComponent(first).trim().replace(/^@/, "");
+  const owner = first.trim().replace(/^@/, "");
   if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(owner)) {
     return null;
   }
@@ -108,10 +117,8 @@ export function validRepoSlug(repo: string): boolean {
 }
 
 export function repoFromPath(pathname: string, apiOrigin = workerApiOrigin): RepoRoute | null {
-  const parts = pathname
-    .split("/")
-    .filter(Boolean)
-    .map((part) => decodeURIComponent(part));
+  const parts = decodedPathParts(pathname);
+  if (!parts) return null;
   const escaped = parts[0] === "-";
   if ((!escaped && parts.length !== 2) || (escaped && parts.length !== 3)) return null;
   const ownerPart = escaped ? parts[1] : parts[0];
@@ -135,10 +142,8 @@ export function ownerActivityFromPath(
   pathname: string,
   apiOrigin = workerApiOrigin,
 ): OwnerActivityRoute | null {
-  const parts = pathname
-    .split("/")
-    .filter(Boolean)
-    .map((part) => decodeURIComponent(part));
+  const parts = decodedPathParts(pathname);
+  if (!parts) return null;
   const escaped = parts[0] === "-" && parts[1]?.toLowerCase() === "owners";
   if (
     (!escaped && (parts.length !== 2 || parts[1]?.toLowerCase() !== "activity")) ||

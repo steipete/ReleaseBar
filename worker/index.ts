@@ -1,4 +1,5 @@
 import { validOwnerSlug } from "../scripts/lib/dashboard.js";
+import { decodedPathParts } from "../src/routing.js";
 import type { RefreshJob } from "../src/types.js";
 import { corsHeaders, jsonResponse } from "./http.js";
 import { openApiSpec } from "./openapi.js";
@@ -288,6 +289,9 @@ export async function routeRequest(
   context: ExecutionContext,
   url: URL,
 ): Promise<Response> {
+  if (!decodedPathParts(url.pathname)) {
+    return jsonResponse({ error: "invalid path encoding" }, 400, { "cache-control": "no-store" });
+  }
   if (
     (request.method === "GET" || request.method === "HEAD") &&
     ownerActivityPageOwner(url.pathname)

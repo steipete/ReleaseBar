@@ -2,6 +2,8 @@
 
 ReleaseBar exposes cached public REST endpoints for agents and dashboards that need GitHub release, people trust, and organization signal context without crawling the whole GitHub graph themselves.
 
+Paths with malformed percent encoding return HTTP 400 with `{"error":"invalid path encoding"}` and `Cache-Control: no-store`, before any cache access or background refresh.
+
 The trust and org signal APIs only use public GitHub profile, organization, repository, and stargazer metadata. They do not prove identity, employment, repository ownership, or maintainer intent. Treat the score as triage context, not an access-control decision.
 
 ## Base URL

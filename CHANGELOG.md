@@ -2,6 +2,7 @@
 
 ## 0.2.4 - Unreleased
 
+- Reject malformed URL path encoding with a non-cacheable HTTP 400 instead of crashing page, API, and social-card requests; share page route parsing between the browser and Worker.
 - Updated Oxfmt, Oxlint, and Node.js type definitions, and refreshed compatible transitive dependencies.
 - Updated Svelte to 5.57 with upstream rendering and reactivity fixes.
 - Updated Bits UI, Vite, Node.js type definitions, Oxfmt, and Oxlint, and refreshed compatible transitive dependencies.

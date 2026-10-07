@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Updated Bits UI and Svelte with upstream interaction and rendering fixes, refreshed the Vite integration and build tools, and updated Node.js type definitions. Thanks @dependabot.
+
 ## 0.2.4 - 2026-09-22
 
 **Highlights:** Malformed URLs no longer crash requests, and updated UI dependencies improve accessibility and rendering reliability.

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Updated Bits UI and Svelte with upstream interaction and rendering fixes, refreshed the Vite integration and build tools, and updated Node.js type definitions. Thanks @dependabot.
+- Updated source-map-js to fix denial of service from malicious indexed source maps (CVE-2026-93749). Thanks @dependabot.
 
 ## 0.2.4 - 2026-09-22
 

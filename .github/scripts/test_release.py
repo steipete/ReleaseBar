@@ -24,6 +24,27 @@ class ReleaseValidationTests(unittest.TestCase):
         with patch.object(validate, 'api', side_effect=pages):
             self.assertEqual(validate.release_for_tag('owner/repo', 'v1.2.3')['id'], 42)
 
+    def test_metadata_is_staged_outside_the_source_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / 'checkout'
+            checkout.mkdir()
+            old = os.getcwd()
+            os.chdir(checkout)
+            try:
+                Path('CHANGELOG.md').write_text('## 1.2.3 - 2026-01-01\n- Shipped\n')
+                with patch.object(validate, 'metadata', return_value='1.2.3'), \
+                     patch.object(validate, 'git', return_value='a' * 40), \
+                     patch.object(validate, 'api', return_value={'workflow_runs':[{
+                         'head_sha':'a' * 40, 'head_branch':'main', 'conclusion':'success'}]}), \
+                     patch.dict(os.environ, {'DRY_RUN':'true', 'RELEASE_TAG':'', 'GITHUB_EVENT_NAME':'push',
+                         'GITHUB_REPOSITORY':'owner/repo', 'RUNNER_TEMP':str(root), 'GITHUB_OUTPUT':str(root/'output')}):
+                    validate.main()
+                self.assertTrue((root/'release/release.json').is_file())
+                self.assertFalse((checkout/'release').exists())
+            finally:
+                os.chdir(old)
+
     def test_bad_notes_fail_closed(self):
         for source in ['## 1.2.3\n- No date', '## 1.2.3 - 2026-01-01\n',
                        '## 1.2.3 - 2999-01-01\n- Future',

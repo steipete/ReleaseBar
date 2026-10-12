@@ -55,6 +55,7 @@ jobs:
         env:
           VERSION: ${{ steps.validate.outputs.version }}
         run: |
+          mv "$RUNNER_TEMP/release" release
           git diff --exit-code
           git archive --format=tar.gz --prefix="ReleaseBar-${VERSION}/" HEAD > "release/ReleaseBar-${VERSION}-source.tar.gz"
           mkdir "$RUNNER_TEMP/source-smoke"

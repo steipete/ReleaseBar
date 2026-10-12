@@ -1,0 +1,93 @@
+name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate and package without publishing
+        type: boolean
+        default: true
+      tag:
+        description: Existing signed tag (leave empty to prove current main)
+        type: string
+        default: ""
+
+permissions: {}
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Validate frozen source and exact push CI
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/validate-release.py
+      - run: npm ci
+      - name: Build and smoke without production data or deployment
+        run: npm run check:static
+      - name: Package the source snapshot
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          git diff --exit-code
+          git archive --format=tar.gz --prefix="ReleaseBar-${VERSION}/" HEAD > "release/ReleaseBar-${VERSION}-source.tar.gz"
+          mkdir "$RUNNER_TEMP/source-smoke"
+          tar -xzf "release/ReleaseBar-${VERSION}-source.tar.gz" -C "$RUNNER_TEMP/source-smoke"
+          cmp package.json "$RUNNER_TEMP/source-smoke/ReleaseBar-${VERSION}/package.json"
+          cmp wrangler.toml "$RUNNER_TEMP/source-smoke/ReleaseBar-${VERSION}/wrangler.toml"
+          (cd release && sha256sum -- * > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/
+      - name: Verify uploaded bytes and publish once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+        run: python3 .github/scripts/publish-release.py

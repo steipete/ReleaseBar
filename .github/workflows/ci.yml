@@ -23,6 +23,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Test release validation
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
       - run: npm ci
       - run: npm run check:static
 

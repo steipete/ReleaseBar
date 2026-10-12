@@ -107,7 +107,7 @@ def main():
         raise ValueError("Successful push CI on this exact main commit is required")
     if not dry and release_for_tag(repo, tag) is not None:
         raise ValueError("This version already has a release; never republish it")
-    out = Path("release")
+    out = Path(os.environ["RUNNER_TEMP"]) / "release"
     out.mkdir(exist_ok=True)
     (out / "RELEASE-NOTES.md").write_text(notes)
     (out / "release.json").write_text(json.dumps({"version": version, "commit": commit, "tag": tag,

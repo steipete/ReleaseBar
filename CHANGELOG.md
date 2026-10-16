@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- Updated Vite, Oxfmt, Oxlint, and Node.js type definitions, and refreshed CI and release setup/artifact actions. Thanks @dependabot.
-- Updated Bits UI and Svelte with upstream interaction and rendering fixes, refreshed the Vite integration and build tools, and updated Node.js type definitions. Thanks @dependabot.
+## 0.2.5 - 2026-10-16
+
+**Highlights:** Fixed a source-map-js denial-of-service vulnerability (CVE-2026-93749) and updated UI dependencies for interaction and rendering fixes.
+
 - Updated source-map-js to fix denial of service from malicious indexed source maps (CVE-2026-93749). Thanks @dependabot.
+- Updated Bits UI and Svelte with upstream interaction and rendering fixes, refreshed the Vite integration and build tools, and updated Node.js type definitions. Thanks @dependabot.
+- Updated Vite, Oxfmt, Oxlint, and Node.js type definitions, and refreshed CI and release setup/artifact actions. Thanks @dependabot.
 
 ## 0.2.4 - 2026-09-22
 

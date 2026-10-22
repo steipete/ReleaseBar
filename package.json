@@ -36,7 +36,7 @@
     "@typescript/native": "npm:typescript@^7.0.2",
     "oxfmt": "^0.73.0",
     "oxlint": "^1.88.0",
-    "svelte-check": "^4.7.6",
+    "svelte-check": "^4.7.7",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vite": "^8.3.4"
   },

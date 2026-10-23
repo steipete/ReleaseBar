@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh the Svelte checker, UI dependencies, and build tools with compatible upstream fixes. Thanks @dependabot.
+
 ## 0.2.5 - 2026-10-16
 
 **Highlights:** Fixed a source-map-js denial-of-service vulnerability (CVE-2026-93749) and updated UI dependencies for interaction and rendering fixes.

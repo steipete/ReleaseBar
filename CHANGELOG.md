@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.6 - 2026-10-23
+
+**Highlights:** Refresh Bits UI with compatible upstream fixes and update dashboard build tooling.
+
 - Refresh the Svelte checker, UI dependencies, and build tools with compatible upstream fixes. Thanks @dependabot.
 
 ## 0.2.5 - 2026-10-16

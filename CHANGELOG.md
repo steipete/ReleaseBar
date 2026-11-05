@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh Svelte, Bits UI, type checking, formatting, and lint tooling with compatible fixes while preserving Node.js 22.12 support. Thanks @dependabot.
+
 ## 0.2.6 - 2026-10-23
 
 **Highlights:** Refresh Bits UI with compatible upstream fixes and update dashboard build tooling.

@@ -25,18 +25,18 @@
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@resvg/resvg-wasm": "^2.6.2",
-    "bits-ui": "^2.19.5",
-    "svelte": "^5.57.2",
+    "bits-ui": "^2.20.6",
+    "svelte": "^5.57.3",
     "svelte-command-palette": "^2.0.2",
     "valibot": "^1.5.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "oxfmt": "^0.74.0",
-    "oxlint": "^1.89.0",
-    "svelte-check": "^4.7.7",
+    "oxfmt": "^0.76.0",
+    "oxlint": "^1.91.0",
+    "svelte-check": "^4.7.8",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vite": "^8.3.5"
   },

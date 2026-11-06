@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep login, logout, and install redirects on this site when a return path normalizes to a protocol-relative URL.
 - Refresh Svelte, Bits UI, type checking, formatting, and lint tooling with compatible fixes while preserving Node.js 22.12 support. Thanks @dependabot.
 
 ## 0.2.6 - 2026-10-23

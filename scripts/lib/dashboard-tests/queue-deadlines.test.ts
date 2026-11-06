@@ -785,6 +785,33 @@ test("safeReturnTo accepts the current request origin, including workers.dev", a
   assert.equal(evilOriginLogout.headers.get("location"), "/");
 });
 
+test("safeReturnTo rejects a normalized protocol-relative path", async () => {
+  const env = {
+    AUTH_COOKIE_SECRET: "test-secret",
+    DASHBOARD_CACHE: kvStore(),
+    GITHUB_APP_CLIENT_ID: "Iv123",
+    GITHUB_APP_CLIENT_SECRET: "client-secret",
+    GITHUB_APP_SLUG: "releasebar-app",
+  };
+  const ctx = { waitUntil: () => undefined };
+  const returnTos = [
+    "/x/..//evil.com",
+    "/%2e%2e//evil.com",
+    "https://release.bar//evil.com",
+    "/%2f%2fevil.com",
+  ];
+
+  for (const returnTo of returnTos) {
+    const response = await worker.fetch(
+      new Request(`https://release.bar/api/auth/logout?returnTo=${encodeURIComponent(returnTo)}`),
+      env,
+      ctx,
+    );
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), "/", returnTo);
+  }
+});
+
 test("worker refreshes stale installation coverage before using its cached token", async () => {
   const sessionId = "session-token-cache";
   const accountLogin = "cacheorg";

@@ -42,3 +42,6 @@ Private repositories are ignored even when selected in the installation. Release
 Dashboard builds validate public GitHub owners and scan up to the 200 most recently pushed public repositories per owner. Lightweight metadata appears before release and CI hydration completes. Active owner issue and pull-request counts refresh more frequently than deeper release data.
 
 Fresh cache is served for about one hour. Stale or partial cache stays visible while a bounded background rebuild continues, and payloads expose separate timestamps for count, release, and CI data. The [public API reference](api.md) defines these cache fields; the [refresh scheduler](refresh-scheduler.md) documents batching, retries, quota selection, and webhook fanout.
+
+Authentication and installation return paths stay on the current site. Invalid
+or external return paths are reset to the home page.

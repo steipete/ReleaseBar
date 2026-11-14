@@ -77,12 +77,24 @@ export function injectInitialPageData(html: string, data: InitialPageData | null
     : html.replace("</head>", `${script}</head>`);
 }
 
+function sameOriginReturnPath(path: string): string {
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/";
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return "/";
+  }
+  if (!decoded.startsWith("/") || decoded.startsWith("//") || decoded.includes("\\")) return "/";
+  return path;
+}
+
 export function safeReturnTo(value: string | null, origin: string): string {
   if (!value || value.startsWith("//")) return "/";
   try {
     const url = new URL(value, origin);
     if (url.origin !== origin) return "/";
-    return `${url.pathname}${url.search}${url.hash}`;
+    return sameOriginReturnPath(`${url.pathname}${url.search}${url.hash}`);
   } catch {
     return "/";
   }
